@@ -1,0 +1,27 @@
+name: Telegram to Drive Sync
+on:
+  workflow_dispatch:
+
+jobs:
+  sync-job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: pip install telethon google-api-python-client google-auth-httplib2 google-auth-oauthlib
+
+      - name: Run Sync Script
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+          MAIN_CHANNEL: ${{ secrets.MAIN_CHANNEL }}
+        run: python bot.py
