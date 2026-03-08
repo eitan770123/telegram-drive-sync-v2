@@ -29,6 +29,7 @@ jobs:
           MAIN_CHANNEL: ${{ secrets.MAIN_CHANNEL }}
           DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
           GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
+          TERABOX_COOKIE: ${{ secrets.TERABOX_COOKIE }}  # הוספנו את השורה הזו!
           START_FROM_MSG_ID: ${{ github.event.inputs.start_id }}
           PYTHONUNBUFFERED: "1"
         run: python terabox_bot.py
