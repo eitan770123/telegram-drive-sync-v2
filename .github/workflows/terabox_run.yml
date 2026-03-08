@@ -1,4 +1,5 @@
-name: TeraBox Link Scanner
+name: TeraBox Scanner Fix
+
 on:
   workflow_dispatch:
 
@@ -16,6 +17,81 @@ jobs:
 
       - name: Install Dependencies
         run: pip install telethon
+
+      - name: Force Create Python Script
+        # השלב הזה דורס כל קובץ שגוי שיש לך ויוצר חדש ונקי
+        run: |
+          rm -f terabox_scanner.py
+          cat << 'EOF' > terabox_scanner.py
+          import os, re, asyncio, sys
+          from telethon import TelegramClient
+
+          # --- הגדרות ---
+          API_ID = int(os.environ['TG_API_ID'])
+          API_HASH = os.environ['TG_API_HASH']
+          MAIN_CHANNEL = os.environ['MAIN_CHANNEL']
+          
+          # סריקה ללא הגבלה
+          LIMIT_MSG = None 
+
+          sys.stdout.reconfigure(encoding='utf-8')
+
+          async def main():
+              print(f"\n=== 🚨 סריקה אגרסיבית (ללא סינון) ===")
+              
+              found_links = []
+              scanned_count = 0
+
+              async with TelegramClient('anon', API_ID, API_HASH) as client:
+                  async for m in client.iter_messages(MAIN_CHANNEL, limit=LIMIT_MSG):
+                      scanned_count += 1
+                      if scanned_count % 100 == 0:
+                          print(f"   ...סרקתי {scanned_count} הודעות...")
+
+                      text = m.text or ""
+                      # חיפוש מתירני של כל סוגי הקישורים
+                      tera_urls = re.findall(r'(https?://[^\s\)]*(?:terabox|1024tera|nephobox|momerybox)[^\s\)]*)', text)
+                      
+                      if not tera_urls:
+                          continue
+
+                      # בדיקת מידע נוסף (לא לסינון, רק לידיעה)
+                      has_media = "כן" if m.media else "לא"
+                      has_tg = "כן" if "t.me" in text else "לא"
+                      
+                      for url in tera_urls:
+                          clean_url = url.rstrip(').,;]')
+                          # כותרת נקייה
+                          title = text.split('\n')[0][:40].replace('\r', '').strip() if text else "ללא כותרת"
+                          
+                          found_links.append({
+                              "id": m.id,
+                              "date": m.date.strftime("%d/%m/%Y"),
+                              "title": title,
+                              "url": clean_url,
+                              "media": has_media,
+                              "tg_link": has_tg
+                          })
+
+              print("\n" + "="*60)
+              print(f"📊 סיכום סריקה:")
+              print(f"סה\"כ נסרקו: {scanned_count} הודעות")
+              print(f"נמצאו: {len(found_links)} קישורים")
+              print("="*60 + "\n")
+
+              if found_links:
+                  print("👇 רשימת הקישורים המלאה: 👇\n")
+                  for item in found_links:
+                      print(f"[{item['date']}] [ID:{item['id']}] {item['title']}")
+                      print(f"   מדיה: {item['media']} | לינק טלגרם: {item['tg_link']}")
+                      print(f"   🔗 {item['url']}\n")
+                      print("-" * 30)
+              else:
+                  print("❌ עדיין 0 קישורים. וודא שמשתנה הסביבה MAIN_CHANNEL מוגדר נכון (שם ערוץ או ID).")
+
+          if __name__ == '__main__':
+              asyncio.run(main())
+          EOF
 
       - name: Run Scanner
         env:
