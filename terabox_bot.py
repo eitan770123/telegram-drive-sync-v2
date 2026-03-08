@@ -1,9 +1,8 @@
-import os, re, asyncio, json, sys, io, time, random
+import os, re, asyncio, json, sys, io, requests, time, random
 from telethon import TelegramClient
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
-from curl_cffi import requests # המנוע החדש והחזק
 
 # --- הגדרות ---
 API_ID = int(os.environ['TG_API_ID'])
@@ -67,43 +66,45 @@ def get_or_create_folder(clean_name):
         return drive_service.files().create(body={'name': clean_name, 'parents': [DRIVE_FOLDER_ID], 'mimeType': 'application/vnd.google-apps.folder'}, fields='id', supportsAllDrives=True).execute().get('id')
     except: return None
 
-# === מנוע ה-Stealth החדש ===
+# === מנוע TeraBox App ===
 
-class TeraBoxStealth:
+class TeraBoxAppEngine:
     def __init__(self, cookies):
-        self.cookies = cookies
+        self.session = requests.Session()
+        self.session.cookies.update(cookies)
+        # זהות של אפליקציית אנדרואיד אמיתית
+        self.session.headers.update({
+            "User-Agent": "TeraBox/3.33.0 (Linux; Android 13; SM-S908B; Build/TP1A.220624.014)",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.terabox.com/wap/home", # חשוב למובייל
+        })
         self.bdstoken = cookies.get('bdstoken', '')
-        # headers בסיסיים, המנוע יעשה את השאר
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
-            "Referer": "https://www.terabox.com/main",
-            "Origin": "https://www.terabox.com",
-        }
-
-    def _get(self, url, params=None):
-        # שימוש ב-impersonate="chrome110" זה הקסם שעוקף את החסימות
-        return requests.get(url, params=params, cookies=self.cookies, headers=self.headers, impersonate="chrome110", timeout=30)
-
-    def _post(self, url, data=None, params=None):
-        return requests.post(url, params=params, data=data, cookies=self.cookies, headers=self.headers, impersonate="chrome110", timeout=30)
 
     def fetch_bdstoken_if_missing(self):
         if self.bdstoken: return
-        print("   🕵️‍♂️ מחפש bdstoken (Stealth Mode)...")
+        print("   🕵️‍♂️ מחפש bdstoken...")
         try:
-            resp = self._get("https://www.terabox.com/main")
+            # במובייל זה נמצא ב-wap/home
+            resp = self.session.get("https://www.terabox.com/wap/home")
             match = re.search(r'"bdstoken"\s*:\s*"([^"]+)"', resp.text)
             if match:
                 self.bdstoken = match.group(1)
-                print(f"   🔑 נמצא טוקן: {self.bdstoken[:10]}...")
+                print(f"   🔑 נמצא: {self.bdstoken[:10]}...")
             else:
-                print("   ⚠️ לא נמצא טוקן בדף.")
+                # נסיון נוסף בדף הראשי
+                resp2 = self.session.get("https://www.terabox.com/main")
+                match2 = re.search(r'"bdstoken"\s*:\s*"([^"]+)"', resp2.text)
+                if match2:
+                    self.bdstoken = match2.group(1)
+                    print(f"   🔑 נמצא (main): {self.bdstoken[:10]}...")
         except: pass
 
     def process_link(self, url):
         self.fetch_bdstoken_if_missing()
         url = url.rstrip(').,;]')
         
+        # חילוץ surl
         short_key = ""
         if 'surl=' in url:
             try:
@@ -116,9 +117,9 @@ class TeraBoxStealth:
         if not short_key: return None
 
         try:
-            # 1. קבלת פרטי קובץ
+            # 1. קבלת פרטי קובץ (שימוש ב-API הרגיל, הוא עובד טוב)
             api_url = f"https://www.terabox.com/api/shorturlinfo?shorturl={short_key}&root=1"
-            resp = self._get(api_url)
+            resp = self.session.get(api_url)
             data = resp.json()
             
             if data.get('errno') != 0:
@@ -134,59 +135,67 @@ class TeraBoxStealth:
             
             print(f"   V זוהה: {filename}")
             
-            # 2. שמירה לחשבון (שיטת העברת נתונים בטוחה)
+            # 2. שמירה לחשבון - התיקון הקריטי
+            # אנחנו נשלח את הכל בתוך ה-DATA (POST Body) ולא ב-URL
+            # ונשתמש בנתיב המותאם למובייל אם הראשי נכשל
+            
             save_url = "https://www.terabox.com/share/save"
             
-            # תיקון לבעיית 405: הפרדה מדויקת בין Query ל-Body
-            query_params = {
+            post_data = {
                 "app_id": "250528",
                 "bdstoken": self.bdstoken,
-                "clienttype": "0"
-            }
-            
-            post_data = {
                 "fid_list": f"[{fs_id}]",
                 "path": "/",
                 "uk": str(data.get('uk')),
                 "shareid": str(data.get('shareid')),
                 "sign": str(data.get('sign')),
-                "timestamp": str(data.get('timestamp'))
+                "timestamp": str(data.get('timestamp')),
+                "clienttype": "0" # 0 = Web/Mobile Web
             }
             
-            # המתנה אנושית
-            time.sleep(2)
+            # עדכון HEADER ספציפי לשמירה
+            self.session.headers.update({
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": f"https://www.terabox.com/wap/share/filelist?surl={short_key[1:]}"
+            })
             
-            save_resp = self._post(save_url, params=query_params, data=post_data)
+            time.sleep(1)
+            save_resp = self.session.post(save_url, data=post_data)
+            
+            # אם עדיין 405, ננסה טריק נוסף: להכניס את bdstoken ל-URL
+            if save_resp.status_code == 405:
+                print("   ⚠️ שגיאת 405, מנסה נתיב חלופי...")
+                save_url_alt = f"https://www.terabox.com/share/save?app_id=250528&bdstoken={self.bdstoken}&clienttype=0"
+                save_resp = self.session.post(save_url_alt, data=post_data)
+
             try:
                 save_data = save_resp.json()
             except:
-                print(f"   X שגיאת שמירה (לא JSON). קוד: {save_resp.status_code}")
+                print(f"   ❌ שגיאת שמירה (HTML): {save_resp.status_code}")
+                # print(save_resp.text[:300]) # לדיבאג
                 return None
 
             if save_data.get('errno') not in [0, 12000]:
                 print(f"   X שגיאת שמירה API: {save_data.get('errno')}")
                 return None
 
-            # 3. מציאת ה-ID הפרטי החדש (חייב למצוא אותו כדי להוריד)
-            search_url = "https://www.terabox.com/api/search"
-            search_params = {
-                "app_id": "250528", 
-                "web": "1", 
-                "key": filename, 
-                "num": "1",
-                "page": "1"
-            }
+            # 3. מציאת ה-ID הפרטי החדש
+            # נשתמש ב-filemanager list שהוא אמין יותר
+            list_url = f"https://www.terabox.com/api/filemanager?oper=list&app_id=250528&order=time&desc=1&dir=/&num=100&bdstoken={self.bdstoken}"
             
-            search_resp = self._get(search_url, params=search_params)
-            search_data = search_resp.json()
+            list_resp = self.session.get(list_url)
+            list_data = list_resp.json()
             
             private_fs_id = None
-            if search_data.get('list'):
-                private_fs_id = search_data['list'][0]['fs_id']
-            else:
-                private_fs_id = fs_id 
+            if list_data.get('list'):
+                for f in list_data['list']:
+                    if f['server_filename'] == filename:
+                        private_fs_id = f['fs_id']
+                        break
+            
+            if not private_fs_id: private_fs_id = fs_id 
 
-            # 4. הורדה פרטית (משתמשים במנוע ה-Stealth גם כאן)
+            # 4. הורדה פרטית (משתמשים ב-User Agent של האפליקציה)
             d_api = "https://www.terabox.com/api/download"
             d_params = {
                 "app_id": "250528",
@@ -194,7 +203,7 @@ class TeraBoxStealth:
                 "type": "dlink"
             }
             
-            d_resp = self._get(d_api, params=d_params)
+            d_resp = self.session.get(d_api, params=d_params)
             d_data = d_resp.json()
             
             dlink = None
@@ -208,7 +217,6 @@ class TeraBoxStealth:
                 return {
                     "name": filename,
                     "url": dlink,
-                    "engine": self, # מעבירים את המנוע עצמו כדי להשתמש בו להורדה
                     "fs_id_to_delete": private_fs_id
                 }
             else:
@@ -218,20 +226,6 @@ class TeraBoxStealth:
             print(f"   X קריסה בתהליך: {e}")
         
         return None
-
-    def download_file(self, url, filename):
-        """ הורדת הקובץ בזרם באמצעות המנוע """
-        try:
-            # שימוש במנוע החזק להורדה
-            with requests.get(url, cookies=self.cookies, headers=self.headers, impersonate="chrome110", stream=True, timeout=120) as r:
-                r.raise_for_status()
-                with open(filename, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=32768): # צ'אנק גדול יותר
-                        if chunk: f.write(chunk)
-            return True
-        except Exception as e:
-            print(f"   X שגיאה בהורדה פיזית: {e}")
-            return False
 
     def delete_file(self, fs_id):
         try:
@@ -243,8 +237,25 @@ class TeraBoxStealth:
                 "bdstoken": self.bdstoken,
                 "clienttype": "0"
             }
-            self._get(del_url, params=params) # לפעמים GET עובד כאן יותר טוב ב-API הזה
+            self.session.post(del_url, params=params)
         except: pass
+    
+    def download_to_disk(self, url, filename):
+        try:
+            # שימוש ב-headers של האפליקציה להורדה
+            headers = self.session.headers.copy()
+            # לפעמים Host מפריע בהורדה
+            if 'Host' in headers: del headers['Host']
+            
+            with self.session.get(url, headers=headers, stream=True, timeout=120) as r:
+                r.raise_for_status()
+                with open(filename, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        if chunk: f.write(chunk)
+            return True
+        except Exception as e:
+             print(f"   X שגיאת רשת בהורדה: {e}")
+             return False
 
 # === ניהול זיכרון ===
 
@@ -308,11 +319,11 @@ async def main():
             
     print(f">>> 🛡️ הגנת כפילויות פעילה ({len(all_existing)} קבצים).")
 
-    # אתחול המנוע החזק
-    stealth_engine = TeraBoxStealth(COOKIE_DICT)
+    # אתחול המנוע
+    tera_engine = TeraBoxAppEngine(COOKIE_DICT)
 
     async with TelegramClient('anon', API_ID, API_HASH) as client:
-        print(f"\n=== 🍪 בוט TeraBox (Stealth Engine) מתחיל מ-ID: {current_msg_id} ===")
+        print(f"\n=== 🍪 בוט TeraBox (Official App Mode) מתחיל מ-ID: {current_msg_id} ===")
         
         async for m in client.iter_messages(MAIN_CHANNEL, limit=3000, reverse=True):
             if m.id <= current_msg_id: continue
@@ -324,7 +335,7 @@ async def main():
                 for raw_url in found_urls:
                     
                     print(f"   ⏳ מעבד: {raw_url}")
-                    file_info = stealth_engine.process_link(raw_url)
+                    file_info = tera_engine.process_link(raw_url)
                     
                     if file_info:
                         f_name = file_info['name']
@@ -332,14 +343,13 @@ async def main():
                         
                         if is_file_already_in_drive(f_name, all_existing):
                             print(f"   ⏩ הקובץ '{f_name}' כבר קיים. מדלג.")
-                            stealth_engine.delete_file(file_info['fs_id_to_delete'])
+                            tera_engine.delete_file(file_info['fs_id_to_delete'])
                             continue
 
                         folder_id = get_or_create_folder("TeraBox_Downloads")
-                        print(f"   ⬇️ מוריד (Stealth)...")
+                        print(f"   ⬇️ מוריד (App Mode)...")
                         
-                        # הורדה דרך המנוע החדש
-                        success = stealth_engine.download_file(d_url, f_name)
+                        success = tera_engine.download_to_disk(d_url, f_name)
                         
                         if success:
                             print(f"   ⬆️ מעלה לדרייב...")
@@ -357,8 +367,8 @@ async def main():
                                 print(f"   ❌ שגיאת העלאה: {e}")
                                 if os.path.exists(f_name): os.remove(f_name)
                         
-                        # ניקוי מהחשבון
-                        stealth_engine.delete_file(file_info['fs_id_to_delete'])
+                        # ניקוי
+                        tera_engine.delete_file(file_info['fs_id_to_delete'])
 
             local_memory["last_msg_id"] = m.id
             if m.id % 5 == 0: save_local_memory(local_memory)
