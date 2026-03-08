@@ -1,10 +1,10 @@
-name: TeraBox Sorted Scanner
+name: TeraBox Folder Sync
 
 on:
   workflow_dispatch:
 
 jobs:
-  scan-job:
+  sync-job:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -16,101 +16,203 @@ jobs:
           python-version: '3.11'
 
       - name: Install Dependencies
-        run: pip install telethon
+        run: pip install telethon google-api-python-client google-auth-httplib2 google-auth-oauthlib requests
 
-      - name: Create Sorted Scanner Script
+      - name: Create Sync Script
         run: |
-          rm -f terabox_scanner.py
-          cat << 'EOF' > terabox_scanner.py
-          import os, re, asyncio, sys
+          cat << 'EOF' > terabox_folder_sync.py
+          import os, re, asyncio, json, sys, io, requests, time
           from telethon import TelegramClient
+          from google.oauth2.credentials import Credentials
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
 
           # --- הגדרות ---
           API_ID = int(os.environ['TG_API_ID'])
           API_HASH = os.environ['TG_API_HASH']
           MAIN_CHANNEL = os.environ['MAIN_CHANNEL']
-          LIMIT_MSG = None 
+          DRIVE_FOLDER_ID = os.environ['DRIVE_FOLDER_ID']
+          COOKIES_CONTENT = os.environ.get('TERABOX_COOKIES_FILE')
+          
+          # סריקה ללא הגבלה
+          LIMIT_MSG = None
 
           sys.stdout.reconfigure(encoding='utf-8')
 
-          async def main():
-              print(f"\n=== 🧹 סורק וממיין קישורים... ===")
-              
-              # שתי רשימות נפרדות
-              critical_list = [] # אין כלום חוץ מהקישור
-              backup_list = []   # יש מדיה או קישור נוסף
+          # --- פענוח קוקיז ---
+          if not COOKIES_CONTENT:
+              print(">>> ❌ שגיאה: הסוד TERABOX_COOKIES_FILE חסר!")
+              sys.exit(1)
 
-              scanned_count = 0
+          def parse_cookies(content):
+              cookies = {}
+              for line in content.splitlines():
+                  if line.startswith('#') or not line.strip(): continue
+                  parts = line.split('\t')
+                  if len(parts) >= 7:
+                      cookies[parts[5]] = parts[6].strip()
+              return cookies
+
+          COOKIE_DICT = parse_cookies(COOKIES_CONTENT)
+          
+          # --- חיבור לגוגל דרייב ---
+          try:
+              token_data = json.loads(os.environ['GOOGLE_TOKEN'])
+              creds = Credentials.from_authorized_user_info(token_data)
+              drive_service = build('drive', 'v3', credentials=creds)
+              print(">>> V מחובר לגוגל דרייב!")
+          except Exception as e:
+              print(f">>> X שגיאה בחיבור לגוגל: {e}")
+              sys.exit(1)
+
+          # --- פונקציות עזר לשמות ---
+          def normalize_name(name):
+              """ מנקה שמות כדי שהשוואה תהיה מדויקת """
+              # מסיר תווים מיוחדים, משאיר אותיות ומספרים, והופך לאותיות קטנות
+              clean = re.sub(r'[^a-zA-Z0-9א-ת\s]', '', name).lower().strip()
+              return clean
+
+          # --- ניהול גוגל דרייב ---
+          def get_drive_folders():
+              """ מחזיר רשימה של כל שמות התיקיות שכבר קיימות בדרייב """
+              print(">>> 📂 סורק תיקיות קיימות בדרייב...")
+              folders = set()
+              page_token = None
+              while True:
+                  # שים לב: אנחנו מחפשים רק תיקיות (mimeType = folder)
+                  q = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+                  response = drive_service.files().list(q=q, spaces='drive', fields='nextPageToken, files(id, name)', pageToken=page_token).execute()
+                  
+                  for file in response.get('files', []):
+                      # שומרים את השם הנקי להשוואה
+                      folders.add(normalize_name(file['name']))
+                  
+                  page_token = response.get('nextPageToken', None)
+                  if page_token is None:
+                      break
+              
+              print(f">>> ✅ נמצאו {len(folders)} תיקיות קיימות בדרייב.")
+              return folders
+
+          def create_folder_in_drive(folder_name):
+              """ יוצר תיקייה חדשה בדרייב ומחזיר את ה-ID שלה """
+              file_metadata = {
+                  'name': folder_name,
+                  'parents': [DRIVE_FOLDER_ID],
+                  'mimeType': 'application/vnd.google-apps.folder'
+              }
+              file = drive_service.files().create(body=file_metadata, fields='id').execute()
+              return file.get('id')
+
+          # --- בדיקת טרה-בוקס ---
+          def get_terabox_folder_info(url):
+              """ מקבל קישור ומחזיר את שם התיקייה בטרה-בוקס """
+              url = url.replace("terabox.com", "1024tera.com").rstrip(').,;]')
+              
+              short_key = ""
+              if 'surl=' in url:
+                  try:
+                      short_key = '1' + url.split('surl=')[1].split('&')[0]
+                  except: pass
+              else:
+                  short_key = url.split('/')[-1]
+              
+              if not short_key: return None
+
+              headers = {
+                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+                  "Referer": "https://www.1024tera.com/",
+                  "Accept": "application/json, text/plain, */*"
+              }
+
+              try:
+                  api_url = f"https://www.1024tera.com/api/shorturlinfo?shorturl={short_key}&root=1"
+                  resp = requests.get(api_url, headers=headers, cookies=COOKIE_DICT, timeout=15)
+                  data = resp.json()
+                  
+                  if data.get('errno') != 0:
+                      print(f"   X שגיאת טרה-בוקס (קוד {data.get('errno')})")
+                      return None
+                  
+                  file_list = data.get('list', [])
+                  if not file_list: return None
+                  
+                  # אמרת שהכל תיקיות, אז אנחנו לוקחים את שם הפריט הראשון
+                  folder_item = file_list[0]
+                  folder_name = folder_item['server_filename']
+                  
+                  # מחזירים גם את השם וגם את המידע להורדה (למקרה שנצטרך)
+                  return {
+                      "name": folder_name,
+                      "shareid": data.get('shareid'),
+                      "uk": data.get('uk'),
+                      "sign": data.get('sign'),
+                      "timestamp": data.get('timestamp'),
+                      "fs_id": folder_item['fs_id']
+                  }
+
+              except Exception as e:
+                  print(f"   X שגיאת רשת בבדיקת שם: {e}")
+                  return None
+
+          # --- לוגיקה ראשית ---
+          async def main():
+              # 1. טעינת כל התיקיות מהדרייב לזיכרון (כדי לא לבדוק כל פעם מחדש)
+              existing_drive_folders = get_drive_folders()
+              
+              print(f"\n=== 🔄 מתחיל סנכרון לפי שמות תיקיות ===")
 
               async with TelegramClient('anon', API_ID, API_HASH) as client:
                   async for m in client.iter_messages(MAIN_CHANNEL, limit=LIMIT_MSG):
-                      scanned_count += 1
-                      if scanned_count % 200 == 0:
-                          print(f"   ...נסרקו {scanned_count} הודעות...")
-
-                      text = m.text or ""
-                      tera_urls = re.findall(r'(https?://[^\s\)]*(?:terabox|1024tera|nephobox)[^\s\)]*)', text)
                       
-                      if not tera_urls:
-                          continue
+                      text = m.text or ""
+                      tera_urls = re.findall(r'(https?://[^\s\)]*(?:terabox|1024tera)[^\s\)]*)', text)
+                      
+                      if not tera_urls: continue
 
-                      # בדיקה האם יש "גיבוי" בהודעה
-                      has_media = m.media is not None
-                      has_tg_link = "t.me" in text
+                      print(f"\n--- הודעה {m.id} ---")
                       
                       for url in tera_urls:
-                          clean_url = url.rstrip(').,;]')
-                          title = text.split('\n')[0][:40].replace('\r', '').strip() if text else "ללא כותרת"
-                          date_str = m.date.strftime("%d/%m/%Y")
+                          # 2. קבלת שם התיקייה מטרה-בוקס
+                          tb_info = get_terabox_folder_info(url)
                           
-                          item = {
-                              "id": m.id,
-                              "date": date_str,
-                              "title": title,
-                              "url": clean_url
-                          }
+                          if not tb_info:
+                              continue
+                              
+                          tb_name = tb_info['name']
+                          clean_tb_name = normalize_name(tb_name)
+                          
+                          print(f"   📂 שם בטרה-בוקס: '{tb_name}'")
 
-                          # מיון לרשימה הנכונה
-                          if not has_media and not has_tg_link:
-                              critical_list.append(item)
+                          # 3. ההשוואה הגדולה
+                          if clean_tb_name in existing_drive_folders:
+                              print(f"   ⏩ התיקייה קיימת בדרייב! מדלג.")
+                              continue
                           else:
-                              # שומרים מידע נוסף לרשימה המשנית
-                              item["info"] = []
-                              if has_media: item["info"].append("יש קובץ/תמונה")
-                              if has_tg_link: item["info"].append("יש לינק טלגרם")
-                              backup_list.append(item)
-
-              print("\n" + "="*60)
-              print(f"📊 סיכום סריקה:")
-              print(f"סה\"כ הודעות עם קישורים: {len(critical_list) + len(backup_list)}")
-              print(f"🔴 קריטי (אין גיבוי): {len(critical_list)}")
-              print(f"🟡 לבדיקה (יש מדיה/לינק): {len(backup_list)}")
-              print("="*60 + "\n")
-
-              if critical_list:
-                  print("🔴🔴🔴 רשימה א': חובה להוריד (אין שום דבר אחר בהודעה) 🔴🔴🔴")
-                  print("(פשוט תעתיק את הכל למנהל הורדות)\n")
-                  for item in critical_list:
-                      print(f"{item['url']}  |  {item['title']}")
-                  print("\n" + "-"*60 + "\n")
-
-              if backup_list:
-                  print("🟡🟡🟡 רשימה ב': יש קובץ מצורף או קישור נוסף 🟡🟡🟡")
-                  print("(יכול להיות שהקובץ המצורף הוא רק תמונה, שווה לבדוק)\n")
-                  for item in backup_list:
-                      info_str = " + ".join(item['info'])
-                      print(f"[ID:{item['id']}] {item['url']}  |  {item['title']}")
-                      print(f"       -> ({info_str})")
-                      print("")
+                              print(f"   🆕 תיקייה חדשה! מתחיל טיפול...")
+                              
+                              # כאן נכנס הקוד להורדה (אם היית רוצה להוריד)
+                              # כרגע, לפי הבקשה שלך, אנחנו רק רוצים לראות שהלוגיקה עובדת
+                              # ויש זיהוי נכון של מה קיים ומה לא.
+                              
+                              # הדגמה ליצירת התיקייה (כדי שבפעם הבאה הוא ידע שהיא קיימת)
+                              # new_folder_id = create_folder_in_drive(tb_name)
+                              # print(f"   ✅ נוצרה תיקייה ריקה בדרייב: {tb_name}")
+                              
+                              # עדכון הרשימה בזיכרון בזמן אמת
+                              # existing_drive_folders.add(clean_tb_name)
 
           if __name__ == '__main__':
               asyncio.run(main())
           EOF
 
-      - name: Run Sorted Scanner
+      - name: Run Sync
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
           MAIN_CHANNEL: ${{ secrets.MAIN_CHANNEL }}
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+          GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
+          TERABOX_COOKIES_FILE: ${{ secrets.TERABOX_COOKIES_FILE }}
           PYTHONUNBUFFERED: "1"
-        run: python terabox_scanner.py
+        run: python terabox_folder_sync.py
