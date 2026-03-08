@@ -36,28 +36,44 @@ def get_clean_name(name):
     return re.sub(r'[\\/*?:"<>|\']', "", name).strip()
 
 def get_terabox_download_link(url):
-    print(f"   ⏳ מפענח קישור (עם קוקיז)...")
+    print(f"   ⏳ מפענח קישור (עם Cookie מלא)...")
     try:
         short_key = url.split('/')[-1]
+        
+        # אנחנו משתמשים בכל הקוקי כמו שהוא, כולל הכל
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36",
-            "Cookie": f"ndus={TERABOX_COOKIE}",
-            "Referer": "https://www.terabox.com/"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Cookie": TERABOX_COOKIE,  # שינוי קריטי: בלי התוספת של ndus=
+            "Referer": "https://www.terabox.com/",
+            "Origin": "https://www.terabox.com",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9,he;q=0.8"
         }
+
         session = requests.Session()
         session.headers.update(headers)
+
+        # בדיקה מקדימה - האם אנחנו בכלל מחוברים?
+        # מנסים לגשת ל-API פשוט כדי לראות אם הקוקי עובד
+        try:
+            check = session.get("https://www.terabox.com/api/user/getinfo", timeout=10)
+            if check.json().get('errno') != 0:
+                 print("   ⚠️ אזהרה: נראה שהקוקיז לא תקין או פג תוקף (Login Failed).")
+        except: pass
 
         # 1. קבלת פרטי קובץ
         info_url = f"https://www.terabox.com/api/shorturlinfo?shorturl={short_key}&root=1"
         resp = session.get(info_url)
         data = resp.json()
         
-        if data.get('errno') != 0:
-            print(f"   X שגיאת API: {data.get('errno')}")
+        if data.get('errno') == 400210:
+            print(f"   X שגיאה 400210: הקוקיז עדיין לא תקין. נא להוציא את כל ה-Request Header.")
             return None
-
+            
         file_list = data.get('list', [])
-        if not file_list: return None
+        if not file_list: 
+            print("   ⚠️ הקישור ריק או לא תקין.")
+            return None
 
         file_item = file_list[0]
         filename = file_item['server_filename']
@@ -68,15 +84,18 @@ def get_terabox_download_link(url):
         # 2. קבלת קישור להורדה
         download_api = "https://www.terabox.com/api/download"
         params = {"fidlist": f"[{fs_id}]", "type": "dlink"}
+        
         d_resp = session.get(download_api, params=params)
-        dlink = d_resp.json().get('dlink', [{}])[0].get('dlink')
+        d_data = d_resp.json()
+        
+        dlink = d_data.get('dlink', [{}])[0].get('dlink')
         
         if dlink:
             return {"name": filename, "download_url": dlink, "headers": headers}
+            
     except Exception as e:
         print(f"   X שגיאה: {e}")
     return None
-
 # === ניהול זיכרון ===
 
 def load_memory():
