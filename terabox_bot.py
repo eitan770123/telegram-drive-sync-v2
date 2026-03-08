@@ -20,28 +20,18 @@ if not COOKIES_CONTENT:
     print(">>> ❌ שגיאה: הסוד TERABOX_COOKIES_FILE חסר!")
     sys.exit(1)
 
-# --- פונקציית הקסם: המרת cookies.txt לשימוש בפייתון ---
 def parse_netscape_cookies(content):
-    """ הופך את הטקסט של cookies.txt למילון שפייתון מבין """
     cookies = {}
     for line in content.splitlines():
-        # דילוג על הערות ושורות ריקות
-        if line.startswith('#') or not line.strip():
-            continue
-        
+        if line.startswith('#') or not line.strip(): continue
         parts = line.split('\t')
-        # פורמט נטסקייפ מכיל 7 עמודות בדרך כלל
         if len(parts) >= 7:
-            name = parts[5]
-            value = parts[6].strip()
-            cookies[name] = value
+            cookies[parts[5]] = parts[6].strip()
     return cookies
 
-# טעינת הקוקיז לזיכרון
 COOKIE_DICT = parse_netscape_cookies(COOKIES_CONTENT)
 print(f">>> 🍪 הקוקיז פוענח בהצלחה ({len(COOKIE_DICT)} ערכים).")
 
-# --- חיבור לדרייב ---
 try:
     token_data = json.loads(os.environ['GOOGLE_TOKEN'])
     creds = Credentials.from_authorized_user_info(token_data)
@@ -58,16 +48,19 @@ def get_clean_name(name):
     return re.sub(r'[\\/*?:"<>|\']', "", name).strip()
 
 def get_terabox_download_link(url):
-    print(f"   ⏳ מנסה לפצח את הקישור...")
+    print(f"   ⏳ מנסה לפצח: {url}")
     try:
-        # טיפול בקישורים מסוג sharing/link?surl=...
-        # החוק של טרה-בוקס: אם הקישור הוא surl=abcde, הקוד האמיתי הוא 1abcde
+        # טיפול ב-surl
         if 'surl=' in url:
-            short_key = '1' + url.split('surl=')[1].split('&')[0]
+            try:
+                surl_val = url.split('surl=')[1].split('&')[0]
+                short_key = '1' + surl_val
+            except:
+                print("      X נכשל בחילוץ surl")
+                return None
         else:
             short_key = url.split('/')[-1]
 
-        # שימוש ב-User Agent של כרום רגיל
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Referer": "https://www.terabox.com/",
@@ -78,20 +71,15 @@ def get_terabox_download_link(url):
 
         session = requests.Session()
         session.headers.update(headers)
-        # טעינת הקוקיז שהמרנו מהקובץ
         session.cookies.update(COOKIE_DICT)
 
-        # 1. קבלת פרטי קובץ
+        # 1. קבלת פרטי קובץ והרשאות שיתוף
         info_url = f"https://www.terabox.com/api/shorturlinfo?shorturl={short_key}&root=1"
         resp = session.get(info_url)
         data = resp.json()
         
         if data.get('errno') != 0:
-            err = data.get('errno')
-            if err == 400210:
-                print(f"   X שגיאה 400210: הקוקיז נדחה (אולי IP שונה).")
-            else:
-                print(f"   X שגיאת טרה-בוקס: {err}")
+            print(f"   X שגיאת טרה-בוקס (info): {data.get('errno')}")
             return None
 
         file_list = data.get('list', [])
@@ -103,26 +91,45 @@ def get_terabox_download_link(url):
         filename = file_item['server_filename']
         fs_id = file_item['fs_id']
         
-        print(f"   V זוהה: {filename}")
+        # === התיקון: חילוץ נתוני השיתוף ===
+        # בשביל להוריד קובץ משותף, חייבים לשלוח את הפרטים האלה
+        shareid = data.get('shareid')
+        uk = data.get('uk')
+        sign = data.get('sign')
+        timestamp = data.get('timestamp')
+        
+        print(f"   V זוהה: {filename} (ShareID: {shareid})")
 
-        # 2. קבלת קישור להורדה
-        download_api = "https://www.terabox.com/api/download"
-        params = {"fidlist": f"[{fs_id}]", "type": "dlink"}
+        # 2. בקשת הורדה דרך ממשק השיתוף (share/download)
+        # זה הפתרון לשגיאה 2
+        download_api = "https://www.terabox.com/share/download"
+        
+        params = {
+            "app_id": "250528",
+            "web": "1",
+            "channel": "dubox",
+            "uk": uk,
+            "shareid": shareid,
+            "timestamp": timestamp,
+            "sign": sign,
+            "fid_list": f"[{fs_id}]",
+            "type": "dlink" # לפעמים צריך ולפעמים לא, לא מזיק
+        }
         
         d_resp = session.get(download_api, params=params)
         d_data = d_resp.json()
         
         if d_data.get('errno') != 0:
-             print(f"   X שגיאה בקבלת לינק: {d_data.get('errno')}")
+             print(f"   X שגיאה בקבלת לינק הורדה: {d_data.get('errno')} (נסה לרענן קוקיז)")
              return None
 
-        dlink = d_data.get('dlink', [{}])[0].get('dlink')
+        dlink = d_data.get('dlink')
         
         if dlink:
             return {"name": filename, "download_url": dlink, "headers": headers, "cookies": session.cookies}
             
     except Exception as e:
-        print(f"   X שגיאה כללית בפענוח: {e}")
+        print(f"   X שגיאה בפענוח: {e}")
     return None
 
 # === ניהול זיכרון ===
@@ -193,22 +200,23 @@ async def main():
             for f in flist: all_existing.add(f)
 
     async with TelegramClient('anon', API_ID, API_HASH) as client:
-        print(f"\n=== 🍪 בוט TeraBox (Parser Edition) מתחיל מ-ID: {current_msg_id} ===")
+        print(f"\n=== 🍪 בוט TeraBox (Share-Link Fix) מתחיל מ-ID: {current_msg_id} ===")
         
         async for m in client.iter_messages(MAIN_CHANNEL, limit=3000, reverse=True):
             if m.id <= current_msg_id: continue
             
             # אם יש טלגרם מדלגים
             if re.search(r't\.me/', m.text or ""):
+                print(f"--- הודעה {m.id}: יש טלגרם, מדלג.")
                 local_memory["last_msg_id"] = m.id
                 continue
             
-            # זיהוי כל סוגי הקישורים כולל surl
-            tera_links = re.findall(r'(https?://(?:www\.)?(?:terabox\.com|nephobox\.com|teraboxapp\.com)/(?:s/|sharing/link\?surl=)[\w\-]+)', m.text or "")
+            # חיפוש מתירני
+            found_urls = re.findall(r'(https?://[^\s]*terabox[^\s]*)', m.text or "")
             
-            if tera_links:
-                print(f"\n🔎 [ID: {m.id}] קישורי TeraBox...")
-                for t_url in tera_links:
+            if found_urls:
+                print(f"--- הודעה {m.id}: נמצאו {len(found_urls)} קישורי טרה-בוקס.")
+                for t_url in found_urls:
                     info = get_terabox_download_link(t_url)
                     
                     if info and info["download_url"]:
@@ -236,7 +244,7 @@ async def main():
                             local_memory["files"].append(f_name)
                             save_local_memory(local_memory)
                         except Exception as e:
-                            print(f"   ❌ שגיאה: {e}")
+                            print(f"   ❌ שגיאה בהורדה: {e}")
                             if os.path.exists(f_name): os.remove(f_name)
 
             local_memory["last_msg_id"] = m.id
