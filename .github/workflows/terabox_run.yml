@@ -1,10 +1,10 @@
-name: TeraBox Folder Sync
+name: TeraBox Smart Gap Scanner
 
 on:
   workflow_dispatch:
 
 jobs:
-  sync-job:
+  smart-scan-job:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -18,14 +18,14 @@ jobs:
       - name: Install Dependencies
         run: pip install telethon google-api-python-client google-auth-httplib2 google-auth-oauthlib requests
 
-      - name: Create Sync Script
+      - name: Create Smart Scanner Script
         run: |
-          cat << 'EOF' > terabox_folder_sync.py
-          import os, re, asyncio, json, sys, io, requests, time
+          cat << 'EOF' > terabox_smart_scanner.py
+          import os, re, asyncio, json, sys, requests
           from telethon import TelegramClient
           from google.oauth2.credentials import Credentials
           from googleapiclient.discovery import build
-          from googleapiclient.http import MediaFileUpload
+          from difflib import SequenceMatcher
 
           # --- הגדרות ---
           API_ID = int(os.environ['TG_API_ID'])
@@ -34,7 +34,7 @@ jobs:
           DRIVE_FOLDER_ID = os.environ['DRIVE_FOLDER_ID']
           COOKIES_CONTENT = os.environ.get('TERABOX_COOKIES_FILE')
           
-          # סריקה ללא הגבלה
+          # סריקה של כל הערוץ
           LIMIT_MSG = None
 
           sys.stdout.reconfigure(encoding='utf-8')
@@ -65,48 +65,62 @@ jobs:
               print(f">>> X שגיאה בחיבור לגוגל: {e}")
               sys.exit(1)
 
-          # --- פונקציות עזר לשמות ---
-          def normalize_name(name):
-              """ מנקה שמות כדי שהשוואה תהיה מדויקת """
-              # מסיר תווים מיוחדים, משאיר אותיות ומספרים, והופך לאותיות קטנות
-              clean = re.sub(r'[^a-zA-Z0-9א-ת\s]', '', name).lower().strip()
+          # --- המוח: זיהוי חכם ---
+          def smart_normalize(name):
+              """ הופך שם ל'שלד' לצורך השוואה """
+              if not name: return ""
+              
+              # 1. הסרת מילים גנריות שלא מעניינות
+              ignore_words = ['גלריה', 'תיקיה', 'תמונות', 'קבצים', 'של', 'מה', 'copy', 'עותק']
+              for word in ignore_words:
+                  name = name.replace(word, '')
+
+              # 2. הסרת כל מה שהוא לא אותיות (כולל מספרים!)
+              # זה משאיר רק את הטקסט האמיתי: "שיעור תורה" -> "שיעורתורה"
+              # "01_שיעור_תורה" -> "שיעורתורה"
+              clean = re.sub(r'[^a-zA-Zא-ת]', '', name).lower()
+              
               return clean
+
+          def is_similar(name1, name2):
+              """ בודק דמיון גם אם יש שגיאות כתיב קלות """
+              n1 = smart_normalize(name1)
+              n2 = smart_normalize(name2)
+              
+              # אם אחד מהם ריק אחרי הניקוי (למשל היה רק מספרים), נשווה מקור
+              if not n1 or not n2:
+                  return name1.strip() == name2.strip()
+
+              # בדיקה מדויקת של השלד
+              if n1 == n2: return True
+              if n1 in n2 or n2 in n1: return True
+              
+              # בדיקת דמיון (Fuzzy Matching) - מעל 85% דמיון
+              ratio = SequenceMatcher(None, n1, n2).ratio()
+              return ratio > 0.85
 
           # --- ניהול גוגל דרייב ---
           def get_drive_folders():
-              """ מחזיר רשימה של כל שמות התיקיות שכבר קיימות בדרייב """
-              print(">>> 📂 סורק תיקיות קיימות בדרייב...")
-              folders = set()
+              print(">>> 📂 טוען רשימת תיקיות מהדרייב (זה ייקח רגע)...")
+              folders = []
               page_token = None
               while True:
-                  # שים לב: אנחנו מחפשים רק תיקיות (mimeType = folder)
                   q = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
                   response = drive_service.files().list(q=q, spaces='drive', fields='nextPageToken, files(id, name)', pageToken=page_token).execute()
                   
                   for file in response.get('files', []):
-                      # שומרים את השם הנקי להשוואה
-                      folders.add(normalize_name(file['name']))
+                      folders.append(file['name'])
                   
                   page_token = response.get('nextPageToken', None)
                   if page_token is None:
                       break
               
-              print(f">>> ✅ נמצאו {len(folders)} תיקיות קיימות בדרייב.")
+              print(f">>> ✅ נטענו {len(folders)} תיקיות מהדרייב.")
               return folders
 
-          def create_folder_in_drive(folder_name):
-              """ יוצר תיקייה חדשה בדרייב ומחזיר את ה-ID שלה """
-              file_metadata = {
-                  'name': folder_name,
-                  'parents': [DRIVE_FOLDER_ID],
-                  'mimeType': 'application/vnd.google-apps.folder'
-              }
-              file = drive_service.files().create(body=file_metadata, fields='id').execute()
-              return file.get('id')
-
-          # --- בדיקת טרה-בוקס ---
-          def get_terabox_folder_info(url):
-              """ מקבל קישור ומחזיר את שם התיקייה בטרה-בוקס """
+          # --- בדיקת שם בטרה-בוקס ---
+          def get_terabox_name(url):
+              # שימוש ב-1024tera למניעת חסימות
               url = url.replace("terabox.com", "1024tera.com").rstrip(').,;]')
               
               short_key = ""
@@ -127,86 +141,74 @@ jobs:
 
               try:
                   api_url = f"https://www.1024tera.com/api/shorturlinfo?shorturl={short_key}&root=1"
-                  resp = requests.get(api_url, headers=headers, cookies=COOKIE_DICT, timeout=15)
+                  resp = requests.get(api_url, headers=headers, cookies=COOKIE_DICT, timeout=10)
                   data = resp.json()
                   
-                  if data.get('errno') != 0:
-                      print(f"   X שגיאת טרה-בוקס (קוד {data.get('errno')})")
-                      return None
-                  
+                  if data.get('errno') != 0: return None
                   file_list = data.get('list', [])
                   if not file_list: return None
                   
-                  # אמרת שהכל תיקיות, אז אנחנו לוקחים את שם הפריט הראשון
-                  folder_item = file_list[0]
-                  folder_name = folder_item['server_filename']
-                  
-                  # מחזירים גם את השם וגם את המידע להורדה (למקרה שנצטרך)
-                  return {
-                      "name": folder_name,
-                      "shareid": data.get('shareid'),
-                      "uk": data.get('uk'),
-                      "sign": data.get('sign'),
-                      "timestamp": data.get('timestamp'),
-                      "fs_id": folder_item['fs_id']
-                  }
+                  return file_list[0]['server_filename']
 
-              except Exception as e:
-                  print(f"   X שגיאת רשת בבדיקת שם: {e}")
-                  return None
+              except: return None
 
           # --- לוגיקה ראשית ---
           async def main():
-              # 1. טעינת כל התיקיות מהדרייב לזיכרון (כדי לא לבדוק כל פעם מחדש)
-              existing_drive_folders = get_drive_folders()
+              existing_folders = get_drive_folders()
+              missing_links = []
               
-              print(f"\n=== 🔄 מתחיל סנכרון לפי שמות תיקיות ===")
+              print(f"\n=== 🕵️‍♂️ מתחיל סריקה חכמה לאיתור חוסרים ===\n")
 
               async with TelegramClient('anon', API_ID, API_HASH) as client:
+                  scanned = 0
                   async for m in client.iter_messages(MAIN_CHANNEL, limit=LIMIT_MSG):
-                      
+                      scanned += 1
+                      if scanned % 50 == 0: print(f"   ...סרקתי {scanned} הודעות...")
+
                       text = m.text or ""
                       tera_urls = re.findall(r'(https?://[^\s\)]*(?:terabox|1024tera)[^\s\)]*)', text)
                       
                       if not tera_urls: continue
 
-                      print(f"\n--- הודעה {m.id} ---")
-                      
                       for url in tera_urls:
-                          # 2. קבלת שם התיקייה מטרה-בוקס
-                          tb_info = get_terabox_folder_info(url)
+                          # 1. השגת שם התיקייה בטרה-בוקס
+                          tb_name = get_terabox_name(url)
                           
-                          if not tb_info:
+                          if not tb_name:
+                              print(f"   ⚠️ דילגתי על קישור לא תקין/פג תוקף: {url}")
                               continue
-                              
-                          tb_name = tb_info['name']
-                          clean_tb_name = normalize_name(tb_name)
                           
-                          print(f"   📂 שם בטרה-בוקס: '{tb_name}'")
+                          # 2. האם התיקייה קיימת בדרייב? (בדיקה חכמה)
+                          found_in_drive = False
+                          for drive_name in existing_folders:
+                              if is_similar(tb_name, drive_name):
+                                  found_in_drive = True
+                                  # print(f"   ✅ נמצאה התאמה: '{tb_name}' == '{drive_name}'")
+                                  break
+                          
+                          if not found_in_drive:
+                              print(f"   🚨 חסר בדרייב: '{tb_name}'")
+                              missing_links.append({"name": tb_name, "url": url, "id": m.id})
 
-                          # 3. ההשוואה הגדולה
-                          if clean_tb_name in existing_drive_folders:
-                              print(f"   ⏩ התיקייה קיימת בדרייב! מדלג.")
-                              continue
-                          else:
-                              print(f"   🆕 תיקייה חדשה! מתחיל טיפול...")
-                              
-                              # כאן נכנס הקוד להורדה (אם היית רוצה להוריד)
-                              # כרגע, לפי הבקשה שלך, אנחנו רק רוצים לראות שהלוגיקה עובדת
-                              # ויש זיהוי נכון של מה קיים ומה לא.
-                              
-                              # הדגמה ליצירת התיקייה (כדי שבפעם הבאה הוא ידע שהיא קיימת)
-                              # new_folder_id = create_folder_in_drive(tb_name)
-                              # print(f"   ✅ נוצרה תיקייה ריקה בדרייב: {tb_name}")
-                              
-                              # עדכון הרשימה בזיכרון בזמן אמת
-                              # existing_drive_folders.add(clean_tb_name)
+              print("\n" + "="*60)
+              print(f"📊 סיכום חוסרים:")
+              print(f"סה\"כ חסרים: {len(missing_links)} תיקיות")
+              print("="*60 + "\n")
+
+              if missing_links:
+                  print("👇 העתק את הקישורים האלה (אלו שאין לך בדרייב): 👇\n")
+                  for item in missing_links:
+                      print(f"📂 {item['name']}")
+                      print(f"🔗 {item['url']}")
+                      print("-" * 30)
+              else:
+                  print("🎉 הדרייב שלך מסונכרן מושלם! לא נמצאו חוסרים.")
 
           if __name__ == '__main__':
               asyncio.run(main())
           EOF
 
-      - name: Run Sync
+      - name: Run Smart Scanner
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
@@ -215,4 +217,4 @@ jobs:
           GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
           TERABOX_COOKIES_FILE: ${{ secrets.TERABOX_COOKIES_FILE }}
           PYTHONUNBUFFERED: "1"
-        run: python terabox_folder_sync.py
+        run: python terabox_smart_scanner.py
