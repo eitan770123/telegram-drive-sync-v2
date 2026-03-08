@@ -19,8 +19,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Dependencies
-        run: pip install telethon google-api-python-client google-auth-httplib2 google-auth-oauthlib requests
+      # התקנת התותח הכבד yt-dlp
+      - name: Install yt-dlp and dependencies
+        run: |
+          pip install telethon google-api-python-client google-auth-httplib2 google-auth-oauthlib requests yt-dlp
 
       - name: Run TeraBox Script
         env:
@@ -29,7 +31,7 @@ jobs:
           MAIN_CHANNEL: ${{ secrets.MAIN_CHANNEL }}
           DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
           GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
-          TERABOX_COOKIE: ${{ secrets.TERABOX_COOKIE }}  # הוספנו את השורה הזו!
+          TERABOX_COOKIES_FILE: ${{ secrets.TERABOX_COOKIES_FILE }} # הסוד החדש
           START_FROM_MSG_ID: ${{ github.event.inputs.start_id }}
           PYTHONUNBUFFERED: "1"
         run: python terabox_bot.py
