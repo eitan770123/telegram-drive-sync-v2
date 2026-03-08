@@ -1,14 +1,9 @@
-name: TeraBox Only Downloader
+name: TeraBox Link Scanner
 on:
   workflow_dispatch:
-    inputs:
-      start_id:
-        description: 'הכנס ID להתחלה ידנית (0 = אוטומטי)'
-        required: true
-        default: '0'
 
 jobs:
-  sync-job:
+  scan-job:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -19,18 +14,13 @@ jobs:
         with:
           python-version: '3.11'
 
-      # התקנת התותח הכבד yt-dlp
       - name: Install Dependencies
-        run: pip install telethon google-api-python-client google-auth-httplib2 google-auth-oauthlib curl_cffi
+        run: pip install telethon
 
-      - name: Run TeraBox Script
+      - name: Run Scanner
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
           MAIN_CHANNEL: ${{ secrets.MAIN_CHANNEL }}
-          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
-          GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
-          TERABOX_COOKIES_FILE: ${{ secrets.TERABOX_COOKIES_FILE }} # הסוד החדש
-          START_FROM_MSG_ID: ${{ github.event.inputs.start_id }}
           PYTHONUNBUFFERED: "1"
-        run: python terabox_bot.py
+        run: python terabox_scanner.py
