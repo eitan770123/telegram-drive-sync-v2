@@ -20,9 +20,8 @@ jobs:
           python-version: '3.11'
 
       # התקנת התותח הכבד yt-dlp
-      - name: Install yt-dlp and dependencies
-        run: |
-          pip install telethon google-api-python-client google-auth-httplib2 google-auth-oauthlib requests yt-dlp
+      - name: Install Dependencies
+        run: pip install telethon google-api-python-client google-auth-httplib2 google-auth-oauthlib curl_cffi
 
       - name: Run TeraBox Script
         env:
