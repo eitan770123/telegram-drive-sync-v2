@@ -1,4 +1,4 @@
-import os, re, asyncio, json, sys, io, requests
+import os, re, asyncio, json, sys, io, requests, random, time
 from telethon import TelegramClient
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -64,9 +64,8 @@ def get_clean_name(name):
     return re.sub(r'[\\/*?:"<>|\']', "", name).strip()
 
 def get_terabox_download_link(url):
-    # ניקוי הקישור מסוגריים או סימנים בסוף
     url = url.rstrip(').,;]')
-    print(f"   ⏳ מנסה לפצח: {url}")
+    print(f"   ⏳ מנסה לפצח (Mobile Mode): {url}")
     
     try:
         if 'surl=' in url:
@@ -74,17 +73,20 @@ def get_terabox_download_link(url):
                 surl_val = url.split('surl=')[1].split('&')[0]
                 short_key = '1' + surl_val
             except:
-                print("      X נכשל בחילוץ surl")
                 return None
         else:
             short_key = url.split('/')[-1]
 
+        # === השינוי הגדול: התחזות לנייד ===
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Referer": "https://www.terabox.com/",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-S908B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36",
+            "Referer": "https://www.terabox.com/wap/share/filelist",
             "Origin": "https://www.terabox.com",
             "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9"
+            "Accept-Language": "en-US,en;q=0.9",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin"
         }
 
         session = requests.Session()
@@ -114,9 +116,12 @@ def get_terabox_download_link(url):
         sign = data.get('sign')
         timestamp = data.get('timestamp')
         
+        # נסיון לחלץ bdstoken מהקוקיז אם קיים (לפעמים עוזר)
+        bdstoken = COOKIE_DICT.get('bdstoken', '')
+        
         print(f"   V זוהה: {filename}")
 
-        # 2. בקשת הורדה
+        # 2. בקשת הורדה - שימוש בפרמטרים נוספים
         download_api = "https://www.terabox.com/share/download"
         params = {
             "app_id": "250528",
@@ -127,32 +132,34 @@ def get_terabox_download_link(url):
             "timestamp": timestamp,
             "sign": sign,
             "fid_list": f"[{fs_id}]",
-            "type": "dlink"
+            "type": "dlink",
+            "bdstoken": bdstoken # הוספת הטוקן אם קיים
         }
+        
+        # השהייה קטנה כדי להיראות אנושי
+        time.sleep(random.uniform(1.0, 2.5))
         
         d_resp = session.get(download_api, params=params)
         d_data = d_resp.json()
         
         if d_data.get('errno') != 0:
-             print(f"   X שגיאה בקבלת לינק: {d_data.get('errno')}")
-             # הדפסת הנתונים כדי להבין למה נכשל
-             print(f"     -> תגובה מלאה: {d_data}") 
+             print(f"   X שגיאה: {d_data.get('errno')} - {d_data.get('errmsg')}")
+             # אם עדיין יש verify_v2, זה אומר שחייבים להחליף IP או קוקיז
+             if d_data.get('errno') == 400310:
+                 print("     ⚠️ טיפ: טרה-בוקס דורש אימות. נסה לרענן את ה-cookies.txt מהדפדפן.")
              return None
 
         dlink = d_data.get('dlink')
         
         if dlink:
+            # עדכון ה-User Agent גם להורדה עצמה (חשוב מאוד!)
             return {"name": filename, "download_url": dlink, "headers": headers, "cookies": session.cookies}
-        else:
-            print(f"   X התקבל אישור (errno=0) אבל אין שדה dlink!")
-            print(f"     -> תגובה מלאה: {d_data}")
             
     except Exception as e:
         print(f"   X שגיאה בפענוח: {e}")
     return None
 
 # === ניהול זיכרון ===
-
 def load_memory():
     print(">>> 🧠 טוען זיכרון...")
     memory = {"files": {}, "last_msg_id": 0}
@@ -222,12 +229,11 @@ async def main():
     print(f">>> 🛡️ הגנה חכמה פעילה: טענתי {len(all_existing)} קבצים להשוואה.")
 
     async with TelegramClient('anon', API_ID, API_HASH) as client:
-        print(f"\n=== 🍪 בוט TeraBox (Debug Mode 2) מתחיל מ-ID: {current_msg_id} ===")
+        print(f"\n=== 🍪 בוט TeraBox (Android Spoof) מתחיל מ-ID: {current_msg_id} ===")
         
         async for m in client.iter_messages(MAIN_CHANNEL, limit=3000, reverse=True):
             if m.id <= current_msg_id: continue
             
-            # הרגקס שופר כדי לא לתפוס סוגריים
             found_urls = re.findall(r'(https?://[^\s\)]*terabox[^\s\)]*)', m.text or "")
             
             if found_urls:
@@ -245,6 +251,7 @@ async def main():
                         folder_id = get_or_create_folder("TeraBox_Downloads")
                         print(f"   ⬇️ מוריד: {f_name}")
                         try:
+                            # שימוש בקוקיז והדרים של המובייל
                             with requests.get(info["download_url"], headers=info["headers"], cookies=info["cookies"], stream=True, timeout=120) as r:
                                 r.raise_for_status()
                                 with open(f_name, 'wb') as f:
