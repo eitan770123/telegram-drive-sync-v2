@@ -10,14 +10,14 @@ API_HASH = os.environ['TG_API_HASH']
 MAIN_CHANNEL = os.environ['MAIN_CHANNEL']
 DRIVE_FOLDER_ID = os.environ['DRIVE_FOLDER_ID']
 START_FROM_ID = int(os.environ.get('START_FROM_MSG_ID', 0))
-TERABOX_COOKIE = os.environ.get('TERABOX_COOKIE') # הסוד החדש
-MEMORY_FILENAME = 'terabox_memory.json'
+TERABOX_COOKIE = os.environ.get('TERABOX_COOKIE')
+MEMORY_FILENAME = 'terabox_memory.json' # זיכרון נפרד כדי לא לגעת בבוט הראשי
 
 sys.stdout.reconfigure(encoding='utf-8')
 
-# --- בדיקות מקדימות ---
+# --- בדיקות ---
 if not TERABOX_COOKIE:
-    print(">>> ❌ שגיאה: לא הוגדר הסוד TERABOX_COOKIE בהגדרות!")
+    print(">>> ❌ שגיאה: לא הוגדר הסוד TERABOX_COOKIE!")
     sys.exit(1)
 
 try:
@@ -29,71 +29,58 @@ except Exception as e:
     print(f">>> X שגיאה בחיבור לגוגל: {e}")
     sys.exit(1)
 
-# === פונקציות טרה-בוקס (השיטה עם הקוקיז) ===
+# === פונקציות טרה-בוקס ===
+
+def get_clean_name(name):
+    if not name: return "Unknown_File"
+    return re.sub(r'[\\/*?:"<>|\']', "", name).strip()
 
 def get_terabox_download_link(url):
-    """ משתמש בקוקיז כדי לקבל קישור הורדה אמיתי """
-    print(f"   ⏳ מנסה לפרוץ את הקישור עם הקוקיז שלך...")
-    
-    # 1. חילוץ ה-Short URL
-    short_key = url.split('/')[-1]
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Cookie": f"ndus={TERABOX_COOKIE}",
-        "Referer": "https://www.terabox.com/"
-    }
-
-    session = requests.Session()
-    session.headers.update(headers)
-
+    print(f"   ⏳ מפענח קישור (עם קוקיז)...")
     try:
-        # שלב א: קבלת מידע על הקובץ
+        short_key = url.split('/')[-1]
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36",
+            "Cookie": f"ndus={TERABOX_COOKIE}",
+            "Referer": "https://www.terabox.com/"
+        }
+        session = requests.Session()
+        session.headers.update(headers)
+
+        # 1. קבלת פרטי קובץ
         info_url = f"https://www.terabox.com/api/shorturlinfo?shorturl={short_key}&root=1"
         resp = session.get(info_url)
         data = resp.json()
         
         if data.get('errno') != 0:
-            print(f"   X שגיאת API (קוד {data.get('errno')}): כנראה הקוקי פג תוקף או הקישור מת.")
+            print(f"   X שגיאת API: {data.get('errno')}")
             return None
 
         file_list = data.get('list', [])
-        if not file_list:
-            print("   X התיקייה ריקה או לא נמצאו קבצים.")
-            return None
+        if not file_list: return None
 
-        # אנחנו לוקחים כרגע את הקובץ הראשון (לרוב זה קובץ בודד)
         file_item = file_list[0]
-        fs_id = file_item['fs_id']
         filename = file_item['server_filename']
+        fs_id = file_item['fs_id']
         
-        print(f"   V זוהה הקובץ: {filename}")
+        print(f"   V זוהה: {filename}")
 
-        # שלב ב: בקשת קישור להורדה
+        # 2. קבלת קישור להורדה
         download_api = "https://www.terabox.com/api/download"
-        params = {
-            "fidlist": f"[{fs_id}]",
-            "type": "dlink"
-        }
-        
+        params = {"fidlist": f"[{fs_id}]", "type": "dlink"}
         d_resp = session.get(download_api, params=params)
-        d_data = d_resp.json()
+        dlink = d_resp.json().get('dlink', [{}])[0].get('dlink')
         
-        if d_data.get('errno') != 0:
-             print("   X לא הצלחתי לייצר קישור הורדה.")
-             return None
-             
-        dlink = d_data.get('dlink', [{}])[0].get('dlink')
         if dlink:
             return {"name": filename, "download_url": dlink, "headers": headers}
-            
     except Exception as e:
-        print(f"   X שגיאה בתהליך: {e}")
-    
+        print(f"   X שגיאה: {e}")
     return None
 
 # === ניהול זיכרון ===
+
 def load_memory():
+    print(">>> 🧠 טוען את זיכרון TeraBox...")
     memory = {"files": [], "last_msg_id": 0}
     file_id = None
     try:
@@ -137,55 +124,70 @@ def get_or_create_folder(clean_name):
 async def main():
     memory_data, memory_file_id = load_memory()
     current_msg_id = START_FROM_ID if START_FROM_ID > 0 else memory_data.get("last_msg_id", 0)
+    
     if "files" not in memory_data: memory_data["files"] = []
 
     async with TelegramClient('anon', API_ID, API_HASH) as client:
-        print(f"\n=== 🍪 בוט TeraBox (מצב מורשה) מתחיל מ-ID: {current_msg_id} ===")
+        print(f"\n=== 🍪 בוט TeraBox (סלקטיבי) מתחיל מ-ID: {current_msg_id} ===")
         
         async for m in client.iter_messages(MAIN_CHANNEL, limit=3000, reverse=True):
             if m.id <= current_msg_id: continue
-            memory_data["last_msg_id"] = m.id
             
-            tera_links = re.findall(r'(https?://(?:www\.)?(?:terabox\.com|nephobox\.com|teraboxapp\.com)/s/[\w\-]+)', m.text or "")
+            # לא מעדכנים את last_msg_id גלובלית כדי לא להפריע לבוט השני,
+            # אלא אם כן תרצה שהבוט הזה ירוץ עצמאית לגמרי. כרגע הוא רץ במקביל.
             
+            txt = m.text or ""
+            
+            # בדיקת קישורים
+            tera_links = re.findall(r'(https?://(?:www\.)?(?:terabox\.com|nephobox\.com|teraboxapp\.com)/s/[\w\-]+)', txt)
+            tg_links = re.findall(r't\.me/', txt) # בדיקה פשוטה אם יש קישור טלגרם כלשהו
+
             if tera_links:
                 print(f"\n🔎 [ID: {m.id}] נמצא קישור TeraBox...")
-
-            for t_url in tera_links:
-                info = get_terabox_download_link(t_url)
                 
-                if info and info["download_url"]:
-                    f_name = info["name"]
-                    
-                    if f_name in memory_data["files"]:
-                        print(f"   ⏩ הקובץ '{f_name}' כבר קיים בזיכרון.")
-                        continue
+                # === חוק הדילוג החדש ===
+                if len(tg_links) > 0:
+                    print(f"   ✋ ההודעה מכילה גם קישור לטלגרם (t.me).")
+                    print(f"   ⏩ משאיר את העבודה לבוט הראשי ומדלג על טרה-בוקס!")
+                    continue
+                # =======================
 
-                    target_folder = "TeraBox_Downloads"
-                    folder_id = get_or_create_folder(target_folder)
+                for t_url in tera_links:
+                    info = get_terabox_download_link(t_url)
                     
-                    print(f"   ⬇️ מוריד: {f_name}")
-                    try:
-                        # שימוש ב-Headers הנכונים להורדה
-                        with requests.get(info["download_url"], headers=info["headers"], stream=True, timeout=120) as r:
-                            r.raise_for_status()
-                            with open(f_name, 'wb') as f:
-                                for chunk in r.iter_content(chunk_size=8192*2): 
-                                    f.write(chunk)
+                    if info and info["download_url"]:
+                        f_name = info["name"]
                         
-                        print(f"   ⬆️ מעלה לדרייב...")
-                        media = MediaFileUpload(f_name, resumable=True)
-                        drive_service.files().create(body={'name': f_name, 'parents': [folder_id]}, media_body=media, supportsAllDrives=True).execute()
-                        
-                        print(f"   ✅ הושלם!")
-                        os.remove(f_name)
-                        memory_data["files"].append(f_name)
-                        memory_file_id = save_memory_force(memory_data, memory_file_id)
-                        
-                    except Exception as e:
-                        print(f"   ❌ שגיאה בהורדה: {e}")
-                        if os.path.exists(f_name): os.remove(f_name)
+                        # בדיקה בזיכרון המקומי של הבוט הזה
+                        if f_name in memory_data["files"]:
+                            print(f"   ⏩ הקובץ '{f_name}' כבר קיים בזיכרון.")
+                            continue
 
+                        target_folder = "TeraBox_Downloads"
+                        folder_id = get_or_create_folder(target_folder)
+                        
+                        print(f"   ⬇️ מוריד: {f_name}")
+                        try:
+                            with requests.get(info["download_url"], headers=info["headers"], stream=True, timeout=120) as r:
+                                r.raise_for_status()
+                                with open(f_name, 'wb') as f:
+                                    for chunk in r.iter_content(chunk_size=16384): f.write(chunk)
+                            
+                            print(f"   ⬆️ מעלה לדרייב...")
+                            media = MediaFileUpload(f_name, resumable=True)
+                            drive_service.files().create(body={'name': f_name, 'parents': [folder_id]}, media_body=media, supportsAllDrives=True).execute()
+                            
+                            print(f"   ✅ הושלם!")
+                            os.remove(f_name)
+                            
+                            memory_data["files"].append(f_name)
+                            memory_file_id = save_memory_force(memory_data, memory_file_id)
+                            
+                        except Exception as e:
+                            print(f"   ❌ שגיאה בהורדה: {e}")
+                            if os.path.exists(f_name): os.remove(f_name)
+
+            # שמירה כל 5 הודעות
             if m.id % 5 == 0:
                 memory_file_id = save_memory_force(memory_data, memory_file_id)
 
