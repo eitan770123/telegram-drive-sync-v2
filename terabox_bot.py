@@ -29,6 +29,8 @@ def parse_netscape_cookies(content):
     return cookies
 
 COOKIE_DICT = parse_netscape_cookies(COOKIES_CONTENT)
+# חילוץ bdstoken אם קיים (עוזר לפעולות בחשבון)
+BDSTOKEN = COOKIE_DICT.get('bdstoken', '')
 print(f">>> 🍪 הקוקיז נטען ({len(COOKIE_DICT)} ערכים).")
 
 try:
@@ -66,16 +68,28 @@ def get_or_create_folder(clean_name):
         return drive_service.files().create(body={'name': clean_name, 'parents': [DRIVE_FOLDER_ID], 'mimeType': 'application/vnd.google-apps.folder'}, fields='id', supportsAllDrives=True).execute().get('id')
     except: return None
 
-# === הליבה: הורדה ישירה מטרה-בוקס ===
+# === פונקציות עבודה מול TeraBox API ===
 
-def get_terabox_direct_link(url):
-    # החלפת דומיין ל-1024tera.com (עוקף חסימות מסוימות)
-    url = url.replace("terabox.com", "1024tera.com").replace("teraboxapp.com", "1024tera.com")
-    url = url.rstrip(').,;]') # ניקוי זנבות
+def create_session():
+    session = requests.Session()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer": "https://www.terabox.com/",
+        "Origin": "https://www.terabox.com",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    session.headers.update(headers)
+    session.cookies.update(COOKIE_DICT)
+    return session
+
+def process_terabox_link(url):
+    session = create_session()
     
-    print(f"   ⏳ מעבד קישור: {url}")
-
-    # חישוב ה-Short Key הנכון
+    # 1. ניקוי ועיבוד הקישור
+    url = url.rstrip(').,;]')
+    print(f"   ⏳ מעבד: {url}")
+    
     short_key = ""
     if 'surl=' in url:
         try:
@@ -85,96 +99,124 @@ def get_terabox_direct_link(url):
     else:
         short_key = url.split('/')[-1]
     
-    if not short_key:
-        print("   X לא הצלחתי לחלץ מזהה (Short Key).")
-        return None
-
-    # שימוש ב-User Agent של מחשב (Desktop) - תואם לקוקיז שלך!
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Referer": "https://www.1024tera.com/",
-        "Origin": "https://www.1024tera.com",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Connection": "keep-alive"
-    }
-
-    session = requests.Session()
-    session.headers.update(headers)
-    session.cookies.update(COOKIE_DICT)
+    if not short_key: return None
 
     try:
-        # שלב 1: קבלת פרטי הקובץ
-        # משתמשים ב-api/shorturlinfo
-        api_url = f"https://www.1024tera.com/api/shorturlinfo?shorturl={short_key}&root=1"
+        # 2. קבלת מידע על הקובץ הציבורי
+        info_url = f"https://www.terabox.com/api/shorturlinfo?shorturl={short_key}&root=1"
+        resp = session.get(info_url)
+        data = resp.json()
         
-        resp = session.get(api_url, timeout=15)
-        try:
-            data = resp.json()
-        except:
-            print(f"   X השרת החזיר תשובה שאינה JSON (אולי HTML של דף חסימה).")
-            return None
-
         if data.get('errno') != 0:
-            print(f"   X שגיאת טרה-בוקס: {data.get('errno')} (הודעה: {data.get('errmsg', 'Unknown')})")
+            print(f"   X שגיאת פרטי קובץ: {data.get('errno')}")
             return None
-
-        file_list = data.get('list', [])
-        if not file_list:
-            print("   ⚠️ התיקייה ריקה או שהקישור פג תוקף.")
-            return None
-
-        # לוקחים את הקובץ הראשון
-        file_item = file_list[0]
-        filename = file_item['server_filename']
-        fs_id = file_item['fs_id']
         
-        # פרמטרים חיוניים להורדה
+        file_list = data.get('list', [])
+        if not file_list: return None
+        
+        # לוקחים את הקובץ הראשון
+        target_file = file_list[0]
+        filename = target_file['server_filename']
+        fs_id = target_file['fs_id'] # זה ה-ID הציבורי
+        
+        # פרמטרים לשמירה
         shareid = data.get('shareid')
         uk = data.get('uk')
         sign = data.get('sign')
         timestamp = data.get('timestamp')
         
-        print(f"   V זוהה הקובץ: {filename}")
-
-        # שלב 2: יצירת קישור להורדה
-        download_api = "https://www.1024tera.com/share/download"
+        print(f"   V זוהה: {filename}")
         
-        params = {
+        # 3. שמירת הקובץ לחשבון שלך (Save to My TeraBox)
+        # זה עוקף את החסימה של ההורדה הציבורית
+        save_url = "https://www.terabox.com/share/save"
+        save_params = {
             "app_id": "250528",
-            "web": "1",
-            "channel": "dubox",
-            "uk": uk,
+            "bdstoken": BDSTOKEN,
             "shareid": shareid,
-            "timestamp": timestamp,
+            "uk": uk,
             "sign": sign,
+            "timestamp": timestamp,
             "fid_list": f"[{fs_id}]",
+            "path": "/" # שומר לתיקייה הראשית
+        }
+        
+        print("   💾 שומר לחשבון שלך...")
+        save_resp = session.post(save_url, data=save_params)
+        save_data = save_resp.json()
+        
+        if save_data.get('errno') != 0:
+            # אם הקובץ כבר קיים (12000), זה בסדר, נמשיך להורדה
+            if save_data.get('errno') == 12000:
+                print("   ℹ️ הקובץ כבר קיים בחשבון שלך.")
+            else:
+                print(f"   X שגיאה בשמירה: {save_data.get('errno')}")
+                return None
+        
+        # 4. מציאת ה-ID הפרטי של הקובץ בחשבון שלך
+        # אנחנו צריכים את ה-fs_id החדש (הפרטי) כדי להוריד
+        # נחפש בתיקייה הראשית את הקובץ עם השם הזה
+        list_url = "https://www.terabox.com/api/list"
+        list_params = {"app_id": "250528", "order": "time", "desc": "1", "dir": "/", "num": "100"}
+        
+        list_resp = session.get(list_url, params=list_params)
+        list_data = list_resp.json()
+        
+        private_fs_id = None
+        for f in list_data.get('list', []):
+            if f['server_filename'] == filename:
+                private_fs_id = f['fs_id']
+                break
+        
+        if not private_fs_id:
+            # אם לא מצאנו לפי שם, אולי נשתמש ב-fs_id המקורי (לפעמים זה עובד)
+            private_fs_id = fs_id
+            
+        # 5. הורדה פרטית (Private Download)
+        # הורדה מהחשבון שלך כמעט אף פעם לא נחסמת ב-400310
+        d_api = "https://www.terabox.com/api/download"
+        d_params = {
+            "app_id": "250528",
+            "fidlist": f"[{private_fs_id}]",
             "type": "dlink"
         }
-
-        # השהייה קצרה למניעת חסימה
-        time.sleep(1)
         
-        d_resp = session.get(download_api, params=params, timeout=15)
+        d_resp = session.get(d_api, params=d_params)
         d_data = d_resp.json()
         
-        if d_data.get('errno') != 0:
-            print(f"   X כישלון בקבלת dlink: {d_data.get('errno')}")
-            return None
-
         dlink = d_data.get('dlink')
+        if not dlink and isinstance(d_data.get('dlink'), list) and len(d_data.get('dlink')) > 0:
+             dlink = d_data.get('dlink')[0].get('dlink')
+             
         if dlink:
             return {
                 "name": filename,
                 "url": dlink,
-                "headers": headers, # חשוב להשתמש באותם כותרים להורדה!
-                "cookies": session.cookies
+                "headers": session.headers,
+                "cookies": session.cookies,
+                "fs_id_to_delete": private_fs_id # נחזיר גם את ה-ID למחיקה
             }
+        else:
+            print(f"   X לא התקבל לינק הורדה פרטי: {d_data}")
             
     except Exception as e:
         print(f"   X שגיאה בתהליך: {e}")
-    
+        
     return None
+
+def delete_from_terabox(fs_id, session):
+    """ מוחק את הקובץ מהחשבון כדי לא לסתום אותו """
+    del_url = "https://www.terabox.com/api/filemanager"
+    params = {
+        "app_id": "250528",
+        "oper": "delete",
+        "target": f"[{fs_id}]",
+        "bdstoken": BDSTOKEN
+    }
+    try:
+        session.post(del_url, params=params)
+        # print("   🗑️ הקובץ נמחק מהחשבון הזמני.")
+    except: pass
 
 # === ניהול זיכרון ===
 
@@ -236,39 +278,37 @@ async def main():
         for flist in main_memory["files"].values():
             for f in flist: all_existing.add(f)
             
-    print(f">>> 🛡️ הגנת כפילויות: {len(all_existing)} קבצים בזיכרון.")
+    print(f">>> 🛡️ הגנת כפילויות פעילה ({len(all_existing)} קבצים).")
 
     async with TelegramClient('anon', API_ID, API_HASH) as client:
-        print(f"\n=== 🍪 בוט TeraBox (Direct Mode) מתחיל מ-ID: {current_msg_id} ===")
+        print(f"\n=== 🍪 בוט TeraBox (Save-and-Download) מתחיל מ-ID: {current_msg_id} ===")
         
         async for m in client.iter_messages(MAIN_CHANNEL, limit=3000, reverse=True):
             if m.id <= current_msg_id: continue
             
-            # חיפוש כל הקישורים האפשריים
             found_urls = re.findall(r'(https?://[^\s\)]*terabox[^\s\)]*)', m.text or "")
             
             if found_urls:
                 print(f"--- הודעה {m.id}: נמצאו {len(found_urls)} קישורים.")
                 for raw_url in found_urls:
                     
-                    # נסיון הורדה
-                    file_info = get_terabox_direct_link(raw_url)
+                    # שימוש בלוגיקה החדשה: שמירה -> הורדה
+                    file_info = process_terabox_link(raw_url)
                     
                     if file_info:
                         f_name = file_info['name']
                         d_url = file_info['url']
                         
-                        # בדיקת כפילות חכמה
                         if is_file_already_in_drive(f_name, all_existing):
                             print(f"   ⏩ הקובץ '{f_name}' כבר קיים. מדלג.")
+                            # ניקוי מהענן גם אם דילגנו
+                            delete_from_terabox(file_info['fs_id_to_delete'], requests.Session()) 
                             continue
 
-                        # הורדה והעלאה
                         folder_id = get_or_create_folder("TeraBox_Downloads")
-                        print(f"   ⬇️ מוריד את הקובץ...")
+                        print(f"   ⬇️ מוריד (מצב פרטי)...")
                         
                         try:
-                            # הורדה בזרם עם ה-Headers הנכונים
                             with requests.get(d_url, headers=file_info['headers'], cookies=file_info['cookies'], stream=True, timeout=120) as r:
                                 r.raise_for_status()
                                 with open(f_name, 'wb') as f:
@@ -278,9 +318,8 @@ async def main():
                             print(f"   ⬆️ מעלה לדרייב...")
                             media = MediaFileUpload(f_name, resumable=True)
                             drive_service.files().create(body={'name': f_name, 'parents': [folder_id]}, media_body=media, supportsAllDrives=True).execute()
-                            print(f"   ✅ עלה בהצלחה!")
+                            print(f"   ✅ הושלם!")
                             
-                            # עדכון זיכרון וניקוי
                             os.remove(f_name)
                             all_existing.add(f_name)
                             if "files" not in local_memory: local_memory["files"] = []
@@ -288,8 +327,14 @@ async def main():
                             save_local_memory(local_memory)
                             
                         except Exception as e:
-                            print(f"   ❌ שגיאה בהורדה/העלאה: {e}")
+                            print(f"   ❌ שגיאה בהורדה: {e}")
                             if os.path.exists(f_name): os.remove(f_name)
+                        
+                        # ניקוי סופי מהענן של טרה-בוקס
+                        try:
+                            clean_session = create_session()
+                            delete_from_terabox(file_info['fs_id_to_delete'], clean_session)
+                        except: pass
 
             local_memory["last_msg_id"] = m.id
             if m.id % 5 == 0: save_local_memory(local_memory)
