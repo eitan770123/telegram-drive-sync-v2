@@ -41,60 +41,40 @@ except Exception as e:
     print(f">>> X שגיאה בחיבור לגוגל: {e}")
     sys.exit(1)
 
-# === פונקציות עזר חכמות ===
+# === פונקציות עזר ===
 
 def normalize_name(name):
-    """ מנקה את השם מתווים מיוחדים כדי לאפשר השוואה חכמה """
-    # מסיר סיומת קובץ (כדי להשוות רק את השם)
     base_name = os.path.splitext(name)[0]
-    # משאיר רק אותיות (עברית/אנגלית) ומספרים. מוחק רווחים, נקודות, מקפים.
     clean = re.sub(r'[^a-zA-Z0-9א-ת]', '', base_name).lower()
     return clean
 
 def is_file_already_in_drive(new_filename, existing_files_set):
-    """ בודק אם הקובץ קיים, גם אם השם קצת שונה """
-    
-    # 1. בדיקה מדויקת (הכי מהיר)
-    if new_filename in existing_files_set:
-        return True
-
-    # 2. בדיקה חכמה (נורמליזציה)
+    if new_filename in existing_files_set: return True
     new_clean = normalize_name(new_filename)
-    
-    # אם השם קצר מדי (פחות מ-3 תווים), לא משווים חכם כדי לא למחוק בטעות
-    if len(new_clean) < 3:
-        return False
-
+    if len(new_clean) < 3: return False
     for existing_file in existing_files_set:
         existing_clean = normalize_name(existing_file)
-        
-        # אם השלד של השמות זהה
-        if new_clean == existing_clean:
-            return True
-            
-        # אם אחד מוכל בשני (למשל "video" בתוך "1_video")
-        # בודקים רק אם יש מספיק בשר (לפחות 5 תווים זהים)
+        if new_clean == existing_clean: return True
         if len(new_clean) > 4 and len(existing_clean) > 4:
-            if new_clean in existing_clean or existing_clean in new_clean:
-                return True
-                
+            if new_clean in existing_clean or existing_clean in new_clean: return True
     return False
-
-# === פונקציות טרה-בוקס ===
 
 def get_clean_name(name):
     if not name: return "Unknown_File"
     return re.sub(r'[\\/*?:"<>|\']', "", name).strip()
 
 def get_terabox_download_link(url):
+    # ניקוי הקישור מסוגריים או סימנים בסוף
+    url = url.rstrip(').,;]')
     print(f"   ⏳ מנסה לפצח: {url}")
+    
     try:
-        # טיפול ב-surl
         if 'surl=' in url:
             try:
                 surl_val = url.split('surl=')[1].split('&')[0]
                 short_key = '1' + surl_val
             except:
+                print("      X נכשל בחילוץ surl")
                 return None
         else:
             short_key = url.split('/')[-1]
@@ -117,17 +97,18 @@ def get_terabox_download_link(url):
         data = resp.json()
         
         if data.get('errno') != 0:
-            print(f"   X שגיאה (info): {data.get('errno')}")
+            print(f"   X שגיאת טרה-בוקס (info): {data.get('errno')}")
             return None
 
         file_list = data.get('list', [])
-        if not file_list: return None
+        if not file_list: 
+            print("   ⚠️ הקישור תקין אך לא נמצאו קבצים.")
+            return None
 
         file_item = file_list[0]
         filename = file_item['server_filename']
         fs_id = file_item['fs_id']
         
-        # נתוני שיתוף
         shareid = data.get('shareid')
         uk = data.get('uk')
         sign = data.get('sign')
@@ -135,7 +116,7 @@ def get_terabox_download_link(url):
         
         print(f"   V זוהה: {filename}")
 
-        # 2. הורדה
+        # 2. בקשת הורדה
         download_api = "https://www.terabox.com/share/download"
         params = {
             "app_id": "250528",
@@ -152,9 +133,19 @@ def get_terabox_download_link(url):
         d_resp = session.get(download_api, params=params)
         d_data = d_resp.json()
         
+        if d_data.get('errno') != 0:
+             print(f"   X שגיאה בקבלת לינק: {d_data.get('errno')}")
+             # הדפסת הנתונים כדי להבין למה נכשל
+             print(f"     -> תגובה מלאה: {d_data}") 
+             return None
+
         dlink = d_data.get('dlink')
+        
         if dlink:
             return {"name": filename, "download_url": dlink, "headers": headers, "cookies": session.cookies}
+        else:
+            print(f"   X התקבל אישור (errno=0) אבל אין שדה dlink!")
+            print(f"     -> תגובה מלאה: {d_data}")
             
     except Exception as e:
         print(f"   X שגיאה בפענוח: {e}")
@@ -223,7 +214,6 @@ async def main():
     main_memory, local_memory, _ = load_memory()
     current_msg_id = START_FROM_ID if START_FROM_ID > 0 else local_memory.get("last_msg_id", 0)
     
-    # יצירת רשימה שטוחה של כל הקבצים הקיימים בדרייב
     all_existing = set(local_memory.get("files", []))
     if "files" in main_memory and isinstance(main_memory["files"], dict):
         for flist in main_memory["files"].values():
@@ -232,12 +222,13 @@ async def main():
     print(f">>> 🛡️ הגנה חכמה פעילה: טענתי {len(all_existing)} קבצים להשוואה.")
 
     async with TelegramClient('anon', API_ID, API_HASH) as client:
-        print(f"\n=== 🍪 בוט TeraBox (Smart Match) מתחיל מ-ID: {current_msg_id} ===")
+        print(f"\n=== 🍪 בוט TeraBox (Debug Mode 2) מתחיל מ-ID: {current_msg_id} ===")
         
         async for m in client.iter_messages(MAIN_CHANNEL, limit=3000, reverse=True):
             if m.id <= current_msg_id: continue
             
-            found_urls = re.findall(r'(https?://[^\s]*terabox[^\s]*)', m.text or "")
+            # הרגקס שופר כדי לא לתפוס סוגריים
+            found_urls = re.findall(r'(https?://[^\s\)]*terabox[^\s\)]*)', m.text or "")
             
             if found_urls:
                 print(f"--- הודעה {m.id}: נמצאו {len(found_urls)} קישורים.")
@@ -247,11 +238,9 @@ async def main():
                     if info and info["download_url"]:
                         f_name = info["name"]
                         
-                        # === השינוי: בדיקה חכמה ===
                         if is_file_already_in_drive(f_name, all_existing):
                             print(f"   ⏩ הקובץ '{f_name}' כבר קיים (בשם דומה). מדלג!")
                             continue
-                        # ==========================
 
                         folder_id = get_or_create_folder("TeraBox_Downloads")
                         print(f"   ⬇️ מוריד: {f_name}")
