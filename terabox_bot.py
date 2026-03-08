@@ -1,4 +1,4 @@
-import os, re, asyncio, json, sys, io, subprocess
+import os, re, asyncio, json, sys, io, requests
 from telethon import TelegramClient
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -10,19 +10,36 @@ API_HASH = os.environ['TG_API_HASH']
 MAIN_CHANNEL = os.environ['MAIN_CHANNEL']
 DRIVE_FOLDER_ID = os.environ['DRIVE_FOLDER_ID']
 START_FROM_ID = int(os.environ.get('START_FROM_MSG_ID', 0))
-COOKIES_CONTENT = os.environ.get('TERABOX_COOKIES_FILE') # הסוד החדש
+COOKIES_CONTENT = os.environ.get('TERABOX_COOKIES_FILE') 
 MEMORY_FILENAME = 'terabox_memory.json'
 
 sys.stdout.reconfigure(encoding='utf-8')
 
-# --- הכנת קובץ הקוקיז לשימוש ---
+# --- בדיקת סוד ---
 if not COOKIES_CONTENT:
     print(">>> ❌ שגיאה: הסוד TERABOX_COOKIES_FILE חסר!")
     sys.exit(1)
 
-# שמירת הקוקיז לקובץ פיזי שהכלי yt-dlp יוכל לקרוא
-with open("cookies.txt", "w", encoding="utf-8") as f:
-    f.write(COOKIES_CONTENT)
+# --- פונקציית הקסם: המרת cookies.txt לשימוש בפייתון ---
+def parse_netscape_cookies(content):
+    """ הופך את הטקסט של cookies.txt למילון שפייתון מבין """
+    cookies = {}
+    for line in content.splitlines():
+        # דילוג על הערות ושורות ריקות
+        if line.startswith('#') or not line.strip():
+            continue
+        
+        parts = line.split('\t')
+        # פורמט נטסקייפ מכיל 7 עמודות בדרך כלל
+        if len(parts) >= 7:
+            name = parts[5]
+            value = parts[6].strip()
+            cookies[name] = value
+    return cookies
+
+# טעינת הקוקיז לזיכרון
+COOKIE_DICT = parse_netscape_cookies(COOKIES_CONTENT)
+print(f">>> 🍪 הקוקיז פוענח בהצלחה ({len(COOKIE_DICT)} ערכים).")
 
 # --- חיבור לדרייב ---
 try:
@@ -34,57 +51,78 @@ except Exception as e:
     print(f">>> X שגיאה בחיבור לגוגל: {e}")
     sys.exit(1)
 
-# === הפונקציה החדשה: שימוש ב-yt-dlp ===
+# === פונקציות טרה-בוקס משופרות ===
 
-def download_with_ytdlp(url):
-    print(f"   ⏳ מפעיל yt-dlp להורדה חכמה...")
+def get_clean_name(name):
+    if not name: return "Unknown_File"
+    return re.sub(r'[\\/*?:"<>|\']', "", name).strip()
+
+def get_terabox_download_link(url):
+    print(f"   ⏳ מנסה לפצח את הקישור...")
     try:
-        # פקודת ההורדה:
-        # --cookies cookies.txt: משתמש בקובץ שיצרנו
-        # -o: קובע את שם הקובץ לשם המקורי מהשרת
-        # --print filename: רק מדפיס את שם הקובץ בהתחלה כדי שנדע מה יורד
+        # טיפול בקישורים מסוג sharing/link?surl=...
+        # החוק של טרה-בוקס: אם הקישור הוא surl=abcde, הקוד האמיתי הוא 1abcde
+        if 'surl=' in url:
+            short_key = '1' + url.split('surl=')[1].split('&')[0]
+        else:
+            short_key = url.split('/')[-1]
+
+        # שימוש ב-User Agent של כרום רגיל
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Referer": "https://www.terabox.com/",
+            "Origin": "https://www.terabox.com",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9"
+        }
+
+        session = requests.Session()
+        session.headers.update(headers)
+        # טעינת הקוקיז שהמרנו מהקובץ
+        session.cookies.update(COOKIE_DICT)
+
+        # 1. קבלת פרטי קובץ
+        info_url = f"https://www.terabox.com/api/shorturlinfo?shorturl={short_key}&root=1"
+        resp = session.get(info_url)
+        data = resp.json()
         
-        # שלב 1: מנסים להשיג את שם הקובץ קודם
-        cmd_name = [
-            "yt-dlp", 
-            "--cookies", "cookies.txt",
-            "--print", "filename",
-            url
-        ]
-        
-        # הרצת בדיקה לקבלת שם הקובץ
-        result = subprocess.run(cmd_name, capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"   X yt-dlp נכשל בזיהוי: {result.stderr}")
+        if data.get('errno') != 0:
+            err = data.get('errno')
+            if err == 400210:
+                print(f"   X שגיאה 400210: הקוקיז נדחה (אולי IP שונה).")
+            else:
+                print(f"   X שגיאת טרה-בוקס: {err}")
             return None
+
+        file_list = data.get('list', [])
+        if not file_list: 
+            print("   ⚠️ הקישור תקין אך לא נמצאו קבצים.")
+            return None
+
+        file_item = file_list[0]
+        filename = file_item['server_filename']
+        fs_id = file_item['fs_id']
+        
+        print(f"   V זוהה: {filename}")
+
+        # 2. קבלת קישור להורדה
+        download_api = "https://www.terabox.com/api/download"
+        params = {"fidlist": f"[{fs_id}]", "type": "dlink"}
+        
+        d_resp = session.get(download_api, params=params)
+        d_data = d_resp.json()
+        
+        if d_data.get('errno') != 0:
+             print(f"   X שגיאה בקבלת לינק: {d_data.get('errno')}")
+             return None
+
+        dlink = d_data.get('dlink', [{}])[0].get('dlink')
+        
+        if dlink:
+            return {"name": filename, "download_url": dlink, "headers": headers, "cookies": session.cookies}
             
-        filename = result.stdout.strip()
-        print(f"   V זוהה הקובץ: {filename}")
-        
-        # שלב 2: הורדה בפועל
-        cmd_download = [
-            "yt-dlp",
-            "--cookies", "cookies.txt",
-            "-o", "%(title)s.%(ext)s", # פורמט שמירה נקי
-            url
-        ]
-        
-        print(f"   ⬇️ מתחיל הורדה...")
-        subprocess.run(cmd_download, check=True)
-        
-        # מחפשים את הקובץ שירד (לפעמים השם משתנה קצת)
-        if os.path.exists(filename):
-            return filename
-        
-        # אם לא מצאנו בדיוק, נחפש קובץ שנוצר בדקה האחרונה
-        files = sorted(os.listdir('.'), key=os.path.getmtime)
-        for f in reversed(files):
-            if f != "cookies.txt" and f != "terabox_bot.py" and not f.endswith(".json"):
-                return f
-                
     except Exception as e:
-        print(f"   X שגיאה בהרצת yt-dlp: {e}")
-        
+        print(f"   X שגיאה כללית בפענוח: {e}")
     return None
 
 # === ניהול זיכרון ===
@@ -93,7 +131,6 @@ def load_memory():
     memory = {"files": {}, "last_msg_id": 0}
     file_id = None
     try:
-        # טוענים את הזיכרון הראשי (למניעת כפילויות)
         q = f"name='bot_memory_v2.json' and '{DRIVE_FOLDER_ID}' in parents and trashed=false"
         res = drive_service.files().list(q=q, supportsAllDrives=True, includeItemsFromAllDrives=True).execute().get('files', [])
         if res:
@@ -107,7 +144,6 @@ def load_memory():
             memory = json.load(fh)
     except: pass
     
-    # זיכרון מקומי
     local_mem = {"files": []}
     try:
         q_local = f"name='{MEMORY_FILENAME}' and '{DRIVE_FOLDER_ID}' in parents and trashed=false"
@@ -157,47 +193,51 @@ async def main():
             for f in flist: all_existing.add(f)
 
     async with TelegramClient('anon', API_ID, API_HASH) as client:
-        print(f"\n=== 🍪 בוט TeraBox (גרסת yt-dlp) מתחיל מ-ID: {current_msg_id} ===")
+        print(f"\n=== 🍪 בוט TeraBox (Parser Edition) מתחיל מ-ID: {current_msg_id} ===")
         
         async for m in client.iter_messages(MAIN_CHANNEL, limit=3000, reverse=True):
             if m.id <= current_msg_id: continue
             
+            # אם יש טלגרם מדלגים
             if re.search(r't\.me/', m.text or ""):
                 local_memory["last_msg_id"] = m.id
                 continue
             
-            tera_links = re.findall(r'(https?://(?:www\.)?(?:terabox\.com|nephobox\.com|teraboxapp\.com)/s/[\w\-]+)', m.text or "")
+            # זיהוי כל סוגי הקישורים כולל surl
+            tera_links = re.findall(r'(https?://(?:www\.)?(?:terabox\.com|nephobox\.com|teraboxapp\.com)/(?:s/|sharing/link\?surl=)[\w\-]+)', m.text or "")
             
             if tera_links:
                 print(f"\n🔎 [ID: {m.id}] קישורי TeraBox...")
                 for t_url in tera_links:
+                    info = get_terabox_download_link(t_url)
                     
-                    # הפעלת ההורדה החדשה
-                    downloaded_file = download_with_ytdlp(t_url)
-                    
-                    if downloaded_file:
-                        if downloaded_file in all_existing:
-                            print(f"   ⏩ הקובץ '{downloaded_file}' כבר קיים בדרייב.")
-                            os.remove(downloaded_file) # מחיקה כי לא צריך
+                    if info and info["download_url"]:
+                        f_name = info["name"]
+                        if f_name in all_existing:
+                            print(f"   ⏩ קיים בדרייב: {f_name}")
                             continue
 
                         folder_id = get_or_create_folder("TeraBox_Downloads")
-                        print(f"   ⬆️ מעלה לדרייב: {downloaded_file}")
-                        
+                        print(f"   ⬇️ מוריד: {f_name}")
                         try:
-                            media = MediaFileUpload(downloaded_file, resumable=True)
-                            drive_service.files().create(body={'name': downloaded_file, 'parents': [folder_id]}, media_body=media, supportsAllDrives=True).execute()
-                            print(f"   ✅ עלה!")
+                            # שימוש בקוקיז המעובדים גם להורדה
+                            with requests.get(info["download_url"], headers=info["headers"], cookies=info["cookies"], stream=True, timeout=120) as r:
+                                r.raise_for_status()
+                                with open(f_name, 'wb') as f:
+                                    for chunk in r.iter_content(chunk_size=16384): f.write(chunk)
                             
-                            all_existing.add(downloaded_file)
+                            media = MediaFileUpload(f_name, resumable=True)
+                            drive_service.files().create(body={'name': f_name, 'parents': [folder_id]}, media_body=media, supportsAllDrives=True).execute()
+                            print(f"   ✅ עלה!")
+                            os.remove(f_name)
+                            
+                            all_existing.add(f_name)
                             if "files" not in local_memory: local_memory["files"] = []
-                            local_memory["files"].append(downloaded_file)
+                            local_memory["files"].append(f_name)
                             save_local_memory(local_memory)
                         except Exception as e:
-                            print(f"   ❌ שגיאה בהעלאה: {e}")
-                        
-                        # ניקוי בסוף
-                        if os.path.exists(downloaded_file): os.remove(downloaded_file)
+                            print(f"   ❌ שגיאה: {e}")
+                            if os.path.exists(f_name): os.remove(f_name)
 
             local_memory["last_msg_id"] = m.id
             if m.id % 5 == 0: save_local_memory(local_memory)
