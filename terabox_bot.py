@@ -77,6 +77,7 @@ class TeraBoxAppEngine:
             "User-Agent": "TeraBox/3.33.0 (Linux; Android 13; SM-S908B; Build/TP1A.220624.014)",
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "identity",
             "Referer": "https://www.terabox.com/wap/home", # חשוב למובייל
         })
         self.bdstoken = cookies.get('bdstoken', '')
@@ -112,7 +113,11 @@ class TeraBoxAppEngine:
                 short_key = '1' + val
             except: pass
         else:
+            # Handle URLs like https://terabox.com/s/1d0H4Zq85b5_B6qTjK-J8tA
+            # and https://terabox.com/s/d0H4Zq85b5_B6qTjK-J8tA
             short_key = url.split('/')[-1]
+            if short_key and not short_key.startswith('1'):
+                short_key = '1' + short_key
         
         if not short_key: return None
 
