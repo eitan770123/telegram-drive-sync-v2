@@ -1,4 +1,4 @@
-name: TeraBox Scanner Fix
+name: TeraBox Sorted Scanner
 
 on:
   workflow_dispatch:
@@ -18,8 +18,7 @@ jobs:
       - name: Install Dependencies
         run: pip install telethon
 
-      - name: Force Create Python Script
-        # השלב הזה דורס כל קובץ שגוי שיש לך ויוצר חדש ונקי
+      - name: Create Sorted Scanner Script
         run: |
           rm -f terabox_scanner.py
           cat << 'EOF' > terabox_scanner.py
@@ -30,70 +29,85 @@ jobs:
           API_ID = int(os.environ['TG_API_ID'])
           API_HASH = os.environ['TG_API_HASH']
           MAIN_CHANNEL = os.environ['MAIN_CHANNEL']
-          
-          # סריקה ללא הגבלה
           LIMIT_MSG = None 
 
           sys.stdout.reconfigure(encoding='utf-8')
 
           async def main():
-              print(f"\n=== 🚨 סריקה אגרסיבית (ללא סינון) ===")
+              print(f"\n=== 🧹 סורק וממיין קישורים... ===")
               
-              found_links = []
+              # שתי רשימות נפרדות
+              critical_list = [] # אין כלום חוץ מהקישור
+              backup_list = []   # יש מדיה או קישור נוסף
+
               scanned_count = 0
 
               async with TelegramClient('anon', API_ID, API_HASH) as client:
                   async for m in client.iter_messages(MAIN_CHANNEL, limit=LIMIT_MSG):
                       scanned_count += 1
-                      if scanned_count % 100 == 0:
-                          print(f"   ...סרקתי {scanned_count} הודעות...")
+                      if scanned_count % 200 == 0:
+                          print(f"   ...נסרקו {scanned_count} הודעות...")
 
                       text = m.text or ""
-                      # חיפוש מתירני של כל סוגי הקישורים
-                      tera_urls = re.findall(r'(https?://[^\s\)]*(?:terabox|1024tera|nephobox|momerybox)[^\s\)]*)', text)
+                      tera_urls = re.findall(r'(https?://[^\s\)]*(?:terabox|1024tera|nephobox)[^\s\)]*)', text)
                       
                       if not tera_urls:
                           continue
 
-                      # בדיקת מידע נוסף (לא לסינון, רק לידיעה)
-                      has_media = "כן" if m.media else "לא"
-                      has_tg = "כן" if "t.me" in text else "לא"
+                      # בדיקה האם יש "גיבוי" בהודעה
+                      has_media = m.media is not None
+                      has_tg_link = "t.me" in text
                       
                       for url in tera_urls:
                           clean_url = url.rstrip(').,;]')
-                          # כותרת נקייה
                           title = text.split('\n')[0][:40].replace('\r', '').strip() if text else "ללא כותרת"
+                          date_str = m.date.strftime("%d/%m/%Y")
                           
-                          found_links.append({
+                          item = {
                               "id": m.id,
-                              "date": m.date.strftime("%d/%m/%Y"),
+                              "date": date_str,
                               "title": title,
-                              "url": clean_url,
-                              "media": has_media,
-                              "tg_link": has_tg
-                          })
+                              "url": clean_url
+                          }
+
+                          # מיון לרשימה הנכונה
+                          if not has_media and not has_tg_link:
+                              critical_list.append(item)
+                          else:
+                              # שומרים מידע נוסף לרשימה המשנית
+                              item["info"] = []
+                              if has_media: item["info"].append("יש קובץ/תמונה")
+                              if has_tg_link: item["info"].append("יש לינק טלגרם")
+                              backup_list.append(item)
 
               print("\n" + "="*60)
               print(f"📊 סיכום סריקה:")
-              print(f"סה\"כ נסרקו: {scanned_count} הודעות")
-              print(f"נמצאו: {len(found_links)} קישורים")
+              print(f"סה\"כ הודעות עם קישורים: {len(critical_list) + len(backup_list)}")
+              print(f"🔴 קריטי (אין גיבוי): {len(critical_list)}")
+              print(f"🟡 לבדיקה (יש מדיה/לינק): {len(backup_list)}")
               print("="*60 + "\n")
 
-              if found_links:
-                  print("👇 רשימת הקישורים המלאה: 👇\n")
-                  for item in found_links:
-                      print(f"[{item['date']}] [ID:{item['id']}] {item['title']}")
-                      print(f"   מדיה: {item['media']} | לינק טלגרם: {item['tg_link']}")
-                      print(f"   🔗 {item['url']}\n")
-                      print("-" * 30)
-              else:
-                  print("❌ עדיין 0 קישורים. וודא שמשתנה הסביבה MAIN_CHANNEL מוגדר נכון (שם ערוץ או ID).")
+              if critical_list:
+                  print("🔴🔴🔴 רשימה א': חובה להוריד (אין שום דבר אחר בהודעה) 🔴🔴🔴")
+                  print("(פשוט תעתיק את הכל למנהל הורדות)\n")
+                  for item in critical_list:
+                      print(f"{item['url']}  |  {item['title']}")
+                  print("\n" + "-"*60 + "\n")
+
+              if backup_list:
+                  print("🟡🟡🟡 רשימה ב': יש קובץ מצורף או קישור נוסף 🟡🟡🟡")
+                  print("(יכול להיות שהקובץ המצורף הוא רק תמונה, שווה לבדוק)\n")
+                  for item in backup_list:
+                      info_str = " + ".join(item['info'])
+                      print(f"[ID:{item['id']}] {item['url']}  |  {item['title']}")
+                      print(f"       -> ({info_str})")
+                      print("")
 
           if __name__ == '__main__':
               asyncio.run(main())
           EOF
 
-      - name: Run Scanner
+      - name: Run Sorted Scanner
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
