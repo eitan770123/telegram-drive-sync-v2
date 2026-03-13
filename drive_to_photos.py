@@ -11,6 +11,7 @@ PHOTOS_MEMORY_FILE = 'photos_sync_memory.json'
 
 sys.stdout.reconfigure(encoding='utf-8')
 
+# --- התחברות וריענון טוקנים ---
 def get_creds():
     token_data = json.loads(os.environ['GOOGLE_TOKEN'])
     creds = Credentials.from_authorized_user_info(token_data)
@@ -20,9 +21,17 @@ def get_creds():
 
 creds = get_creds()
 drive_service = build('drive', 'v3', credentials=creds)
-access_token = creds.token
 print(">>> V מחובר לגוגל דרייב!")
 
+# הפונקציה החדשה שמרעננת את הטוקן באמצע הריצה אם עברה שעה!
+def get_valid_token():
+    global creds
+    if not creds.valid or creds.expired:
+        print("🔄 הטוקן פג תוקף (עברה שעה). מחדש אותו עכשיו...")
+        creds.refresh(google.auth.transport.requests.Request())
+    return creds.token
+
+# --- עבודה עם קבצי זיכרון ---
 def download_json_from_drive(filename):
     try:
         q = f"name='{filename}' and '{DRIVE_ROOT_ID}' in parents and trashed=false"
@@ -51,6 +60,7 @@ def save_json_to_drive(filename, data, file_id):
         file_id = new_f.get('id')
     return file_id
 
+# --- פעולות בדרייב ופוטוס ---
 def get_drive_folder_id(folder_name):
     q = f"name='{folder_name}' and '{DRIVE_ROOT_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
     res = drive_service.files().list(q=q, fields='files(id)').execute().get('files', [])
@@ -62,7 +72,8 @@ def get_or_create_album(album_title, photos_memory):
     
     print(f"   📁 מנסה ליצור אלבום: '{album_title}'...")
     url = 'https://photoslibrary.googleapis.com/v1/albums'
-    headers = {'Authorization': f'Bearer {access_token}', 'Content-type': 'application/json'}
+    # שימוש בטוקן החכם
+    headers = {'Authorization': f'Bearer {get_valid_token()}', 'Content-type': 'application/json'}
     res = requests.post(url, headers=headers, json={"album": {"title": album_title}})
     data = res.json()
     
@@ -75,23 +86,26 @@ def get_or_create_album(album_title, photos_memory):
     return None
 
 def upload_to_photos(file_path, album_id):
+    # שימוש בטוקן החכם
+    token = get_valid_token()
     headers = {
-        'Authorization': f'Bearer {access_token}',
+        'Authorization': f'Bearer {token}',
         'Content-type': 'application/octet-stream',
         'X-Goog-Upload-Protocol': 'raw',
         'X-Goog-Upload-File-Name': os.path.basename(file_path)
     }
     resp = requests.post('https://photoslibrary.googleapis.com/v1/uploads', headers=headers, data=open(file_path, 'rb'))
-    token = resp.text
+    upload_token = resp.text
     
-    if not token or "error" in token.lower():
-        print(f"      ❌ שגיאה בהעלאת קובץ: {token}")
+    if not upload_token or "error" in upload_token.lower():
+        print(f"      ❌ שגיאה בהעלאת קובץ: {upload_token}")
         return False
     
-    payload = {"albumId": album_id, "newMediaItems": [{"simpleMediaItem": {"uploadToken": token}}]}
-    res = requests.post('https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate', headers={'Authorization': f'Bearer {access_token}'}, json=payload)
+    payload = {"albumId": album_id, "newMediaItems": [{"simpleMediaItem": {"uploadToken": upload_token}}]}
+    res = requests.post('https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate', headers={'Authorization': f'Bearer {token}'}, json=payload)
     return res.status_code == 200
 
+# --- הלוגיקה המרכזית ---
 def main():
     drive_memory, _ = download_json_from_drive(DRIVE_MEMORY_FILE)
     if not drive_memory:
@@ -115,7 +129,6 @@ def main():
         if not folder_id or not album_id: continue
 
         for file_name in files_to_upload:
-            # הורדה מדרייב
             q = f"name='{file_name}' and '{folder_id}' in parents and trashed=false"
             res = drive_service.files().list(q=q, fields='files(id)').execute().get('files', [])
             if not res: continue
