@@ -1,10 +1,10 @@
-name: Google Photos Smart Sync
+name: Sync Drive to Photos
 
 on:
   workflow_dispatch:
 
 jobs:
-  photos-job:
+  sync-job:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -16,14 +16,11 @@ jobs:
           python-version: '3.11'
 
       - name: Install Dependencies
-        run: pip install telethon requests google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
+        run: pip install requests google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
 
-      - name: Run Photos Smart Sync
+      - name: Run Drive to Photos Sync
         env:
-          TG_API_ID: ${{ secrets.TG_API_ID }}
-          TG_API_HASH: ${{ secrets.TG_API_HASH }}
-          MAIN_CHANNEL: ${{ secrets.MAIN_CHANNEL }}
           DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
           GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
           PYTHONUNBUFFERED: "1"
-        run: python telegram_to_photos.py
+        run: python drive_to_photos.py
